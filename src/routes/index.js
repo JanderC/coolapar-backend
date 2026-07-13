@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 
 router.use('/auth', require('./auth.routes'));
+router.use('/configuracion', require('./configuracion.routes'));
 router.use('/productores', require('./productor.routes'));
 router.use('/semanas-pago', require('./semanaPago.routes'));
 router.use('/registros-leche', require('./registroLeche.routes'));

@@ -22,6 +22,7 @@ const HistorialPesoPieza = require('./historialPesoPieza.model')(sequelize, Data
 const Proveedor = require('./proveedor.model')(sequelize, DataTypes);
 const CompraProveedor = require('./compraProveedor.model')(sequelize, DataTypes);
 const Devolucion = require('./devolucion.model')(sequelize, DataTypes);
+const ConfiguracionSistema = require('./configuracionSistema.model')(sequelize, DataTypes);
 
 // =========================
 // RELACIONES: PRODUCTORES / SEMANAS / PAGOS
@@ -120,4 +121,5 @@ module.exports = {
   Proveedor,
   CompraProveedor,
   Devolucion,
+  ConfiguracionSistema,
 };
