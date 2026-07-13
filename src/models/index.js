@@ -3,6 +3,7 @@ const { DataTypes } = require('sequelize');
 
 // Carga de modelos (cada archivo exporta una funcion (sequelize, DataTypes) => Model)
 const Usuario = require('./usuario.model')(sequelize, DataTypes);
+const Ruta = require('./ruta.model')(sequelize, DataTypes);
 const Productor = require('./productor.model')(sequelize, DataTypes);
 const SemanaPago = require('./semanaPago.model')(sequelize, DataTypes);
 const RegistroLecheProductor = require('./registroLecheProductor.model')(sequelize, DataTypes);
@@ -23,6 +24,12 @@ const Proveedor = require('./proveedor.model')(sequelize, DataTypes);
 const CompraProveedor = require('./compraProveedor.model')(sequelize, DataTypes);
 const Devolucion = require('./devolucion.model')(sequelize, DataTypes);
 const ConfiguracionSistema = require('./configuracionSistema.model')(sequelize, DataTypes);
+
+// =========================
+// RELACIONES: RUTAS / PRODUCTORES
+// =========================
+Ruta.hasMany(Productor, { foreignKey: 'ruta_id' });
+Productor.belongsTo(Ruta, { foreignKey: 'ruta_id' });
 
 // =========================
 // RELACIONES: PRODUCTORES / SEMANAS / PAGOS
@@ -99,9 +106,12 @@ Devolucion.belongsTo(Proveedor, { foreignKey: 'proveedor_id' });
 Producto.hasMany(Devolucion, { foreignKey: 'producto_id' });
 Devolucion.belongsTo(Producto, { foreignKey: 'producto_id' });
 
+// ConfiguracionSistema no tiene relaciones: es una fila unica de config global.
+
 module.exports = {
   sequelize,
   Usuario,
+  Ruta,
   Productor,
   SemanaPago,
   RegistroLecheProductor,
