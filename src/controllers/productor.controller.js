@@ -33,7 +33,7 @@ const crear = asyncHandler(async (req, res) => {
     telefono,
     direccion,
     precio_litro_base,
-    moneda: moneda || 'BOB',
+    moneda: moneda || 'BS',
   });
 
   res.status(201).json({ success: true, data: productor });

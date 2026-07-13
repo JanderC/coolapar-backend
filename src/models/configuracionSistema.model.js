@@ -10,9 +10,9 @@ module.exports = (sequelize, DataTypes) => {
       moneda_actual: {
         type: DataTypes.STRING(3),
         allowNull: false,
-        defaultValue: 'BOB',
+        defaultValue: 'BS',
         validate: {
-          isIn: [['BOB', 'USD', 'COP']],
+          isIn: [['BS', 'USD', 'COP']],
         },
       },
     },

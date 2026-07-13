@@ -6,7 +6,7 @@ const { MONEDAS, esMonedaValida } = require('../utils/moneda.util');
 const obtenerConfiguracion = async () => {
   let config = await ConfiguracionSistema.findOne({ order: [['id', 'ASC']] });
   if (!config) {
-    config = await ConfiguracionSistema.create({ moneda_actual: 'BOB' });
+    config = await ConfiguracionSistema.create({ moneda_actual: 'BS' });
   }
   return config;
 };
