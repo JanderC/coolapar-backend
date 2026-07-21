@@ -4,7 +4,7 @@ const { obtener, actualizarMoneda } = require('../controllers/configuracion.cont
 const { proteger, permitirRoles } = require('../middlewares/auth.middleware');
 
 // Cualquier usuario autenticado puede leer la moneda activa
-router.get('/', proteger, obtener);
+router.get('/', obtener);
 
 // Solo el admin puede cambiar la moneda global del sistema
 router.put('/moneda', proteger, permitirRoles('admin'), actualizarMoneda);
