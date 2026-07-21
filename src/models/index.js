@@ -106,7 +106,7 @@ Devolucion.belongsTo(Proveedor, { foreignKey: 'proveedor_id' });
 Producto.hasMany(Devolucion, { foreignKey: 'producto_id' });
 Devolucion.belongsTo(Producto, { foreignKey: 'producto_id' });
 
-// ConfiguracionSistema no tiene relaciones: es una fila unica de config global.
+// ConfiguracionSistema no tiene relaciones: es una fila unica de config global. prueba unica
 
 module.exports = {
   sequelize,
