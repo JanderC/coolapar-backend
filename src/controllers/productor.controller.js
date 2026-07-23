@@ -34,6 +34,10 @@ const normalizarCampos = (body = {}) => {
     datos.precio_litro_base = vacio(body.precio_litro_base) ? null : Number(body.precio_litro_base);
   }
 
+  if (body.precio_litro_acida !== undefined) {
+    datos.precio_litro_acida = vacio(body.precio_litro_acida) ? null : Number(body.precio_litro_acida);
+  }
+
   if (body.moneda !== undefined) datos.moneda = vacio(body.moneda) ? 'BS' : String(body.moneda).toUpperCase();
 
   if (body.color_identificativo !== undefined) {
@@ -63,6 +67,12 @@ const validarDatos = async (datos, { esCreacion }) => {
   if (datos.precio_litro_base !== undefined && datos.precio_litro_base !== null) {
     if (Number.isNaN(datos.precio_litro_base) || datos.precio_litro_base < 0) {
       return 'El precio por litro debe ser un número mayor o igual a 0.';
+    }
+  }
+
+  if (datos.precio_litro_acida !== undefined && datos.precio_litro_acida !== null) {
+    if (Number.isNaN(datos.precio_litro_acida) || datos.precio_litro_acida < 0) {
+      return 'El precio de la leche ácida debe ser un número mayor o igual a 0.';
     }
   }
 

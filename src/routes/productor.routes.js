@@ -17,6 +17,9 @@ const validar = require('../middlewares/validate.middleware');
 const MONEDAS = ['BS', 'USD', 'COP'];
 const HEX = /^#[0-9A-Fa-f]{6}$/;
 
+// Reglas compartidas entre POST y PUT.
+// El color YA NO es obligatorio ni único: identifica el nivel de precio
+// de la leche, así que se puede repetir entre productores.
 const reglasProductor = (esCreacion) => [
   esCreacion
     ? body('nombre').trim().notEmpty().withMessage('El nombre es obligatorio')
@@ -45,6 +48,12 @@ const reglasProductor = (esCreacion) => [
     .customSanitizer((v) => (v === '' ? null : v))
     .custom((v) => v === null || (!Number.isNaN(Number(v)) && Number(v) >= 0))
     .withMessage('El precio por litro debe ser un número mayor o igual a 0'),
+
+  body('precio_litro_acida')
+    .optional({ nullable: true })
+    .customSanitizer((v) => (v === '' ? null : v))
+    .custom((v) => v === null || (!Number.isNaN(Number(v)) && Number(v) >= 0))
+    .withMessage('El precio de la leche ácida debe ser un número mayor o igual a 0'),
 
   body('telefono').optional({ nullable: true }).isLength({ max: 30 }).withMessage('Teléfono demasiado largo'),
   body('direccion').optional({ nullable: true }).isLength({ max: 255 }).withMessage('Dirección demasiado larga'),

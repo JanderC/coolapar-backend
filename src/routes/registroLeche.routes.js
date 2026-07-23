@@ -39,6 +39,10 @@ router.post(
     body('productor_id').isInt().withMessage('Seleccione un productor'),
     body('semana_id').isInt().withMessage('Falta la semana'),
     body('precio_litro').isFloat({ gt: 0 }).withMessage('El precio por litro debe ser mayor a 0'),
+    body('precio_litro_acida')
+      .optional({ nullable: true })
+      .isFloat({ min: 0 })
+      .withMessage('El precio de la leche ácida debe ser mayor o igual a 0'),
     body('moneda').optional().customSanitizer((v) => String(v || '').toUpperCase()).isIn(MONEDAS),
     body('dias').isArray({ min: 1 }).withMessage('Faltan los días de la semana'),
   ],
