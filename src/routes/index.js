@@ -19,5 +19,6 @@ router.use('/piezas-queso', require('./piezaQueso.routes'));
 router.use('/proveedores', require('./proveedor.routes'));
 router.use('/compras-proveedores', require('./compraProveedor.routes'));
 router.use('/devoluciones', require('./devolucion.routes'));
+router.use('/ruteros', require('./rutero.routes'));
 
 module.exports = router;
