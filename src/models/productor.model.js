@@ -48,6 +48,14 @@ module.exports = (sequelize, DataTypes) => {
         validate: { min: { args: [0], msg: 'El precio de la leche ácida no puede ser negativo.' } },
       },
 
+      // Precio de referencia para la leche baja en grasa. Igual que la
+      // ácida: puede quedar vacío si este productor nunca la trae.
+      precio_litro_bajo_grasa: {
+        type: DataTypes.DECIMAL(10, 2),
+        allowNull: true,
+        validate: { min: { args: [0], msg: 'El precio de la leche baja en grasa no puede ser negativo.' } },
+      },
+
       moneda: {
         type: DataTypes.STRING(3),
         allowNull: false,

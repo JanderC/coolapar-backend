@@ -55,6 +55,12 @@ const reglasProductor = (esCreacion) => [
     .custom((v) => v === null || (!Number.isNaN(Number(v)) && Number(v) >= 0))
     .withMessage('El precio de la leche ácida debe ser un número mayor o igual a 0'),
 
+  body('precio_litro_bajo_grasa')
+    .optional({ nullable: true })
+    .customSanitizer((v) => (v === '' ? null : v))
+    .custom((v) => v === null || (!Number.isNaN(Number(v)) && Number(v) >= 0))
+    .withMessage('El precio de la leche baja en grasa debe ser un número mayor o igual a 0'),
+
   body('telefono').optional({ nullable: true }).isLength({ max: 30 }).withMessage('Teléfono demasiado largo'),
   body('direccion').optional({ nullable: true }).isLength({ max: 255 }).withMessage('Dirección demasiado larga'),
 ];

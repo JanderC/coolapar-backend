@@ -24,7 +24,15 @@ const PagoProductor = db.PagoProductor || db.PagosProductores || db.PagoProducto
 const incluirProductor = {
   model: Productor,
   as: 'Productor',
-  attributes: ['id', 'nombre', 'color_identificativo', 'moneda', 'precio_litro_base', 'precio_litro_acida'],
+  attributes: [
+    'id',
+    'nombre',
+    'color_identificativo',
+    'moneda',
+    'precio_litro_base',
+    'precio_litro_acida',
+    'precio_litro_bajo_grasa',
+  ],
 };
 
 // ============================================================
@@ -124,8 +132,10 @@ const armarHoja = async (productor, semana) => {
       registro_id: registro?.id || null,
       litros: registro ? Number(registro.litros) : null,
       litros_acidos: registro ? Number(registro.litros_acidos || 0) : null,
+      litros_bajo_grasa: registro ? Number(registro.litros_bajo_grasa || 0) : null,
       precio_litro: registro ? Number(registro.precio_litro) : null,
       precio_litro_acida: registro ? Number(registro.precio_litro_acida || 0) : null,
+      precio_litro_bajo_grasa: registro ? Number(registro.precio_litro_bajo_grasa || 0) : null,
       moneda: registro?.moneda || null,
       subtotal: registro ? Number(registro.subtotal || 0) : 0,
     };
@@ -134,6 +144,7 @@ const armarHoja = async (productor, semana) => {
   const conDatos = dias.filter((d) => d.litros !== null);
   const total_litros = redondear(conDatos.reduce((s, d) => s + d.litros, 0));
   const total_litros_acidos = redondear(conDatos.reduce((s, d) => s + (d.litros_acidos || 0), 0));
+  const total_litros_bajo_grasa = redondear(conDatos.reduce((s, d) => s + (d.litros_bajo_grasa || 0), 0));
   const total_pagar = redondear(conDatos.reduce((s, d) => s + d.subtotal, 0));
 
   const precio_litro = conDatos.length
@@ -142,6 +153,9 @@ const armarHoja = async (productor, semana) => {
   const precio_litro_acida = conDatos.length
     ? Number(conDatos[conDatos.length - 1].precio_litro_acida || 0)
     : Number(productor.precio_litro_acida || 0);
+  const precio_litro_bajo_grasa = conDatos.length
+    ? Number(conDatos[conDatos.length - 1].precio_litro_bajo_grasa || 0)
+    : Number(productor.precio_litro_bajo_grasa || 0);
   const moneda = conDatos.length
     ? conDatos[conDatos.length - 1].moneda
     : normalizarMoneda(productor.moneda, 'BS');
@@ -157,6 +171,7 @@ const armarHoja = async (productor, semana) => {
       color_identificativo: productor.color_identificativo,
       precio_litro_base: productor.precio_litro_base,
       precio_litro_acida: productor.precio_litro_acida,
+      precio_litro_bajo_grasa: productor.precio_litro_bajo_grasa,
       moneda: productor.moneda,
     },
     semana: {
@@ -168,12 +183,14 @@ const armarHoja = async (productor, semana) => {
     },
     precio_litro,
     precio_litro_acida,
+    precio_litro_bajo_grasa,
     moneda,
     dias,
     totales: {
       dias_con_leche: conDatos.length,
       total_litros,
       total_litros_acidos,
+      total_litros_bajo_grasa,
       total_pagar,
     },
     pago,
@@ -198,13 +215,15 @@ const obtenerHoja = asyncHandler(async (req, res) => {
 
 // @desc  Guardar los litros de la semana
 // @route POST /api/registros-leche/hoja
-// body: { productor_id, semana_id, precio_litro, precio_litro_acida, moneda,
-//         dias: [{ fecha, litros, litros_acidos }] }
+// body: { productor_id, semana_id, precio_litro, precio_litro_acida, precio_litro_bajo_grasa, moneda,
+//         dias: [{ fecha, litros, litros_acidos, litros_bajo_grasa }] }
 const guardarHoja = asyncHandler(async (req, res) => {
   const { productor_id, semana_id, dias } = req.body;
   const precio_litro = aNumero(req.body.precio_litro, NaN);
-  // La leche ácida es opcional: si el productor nunca trae, se queda en 0.
+  // La leche ácida y la baja en grasa son opcionales: si el productor
+  // nunca trae, se quedan en 0.
   const precio_litro_acida = aNumero(req.body.precio_litro_acida, 0);
+  const precio_litro_bajo_grasa = aNumero(req.body.precio_litro_bajo_grasa, 0);
   const moneda = normalizarMoneda(req.body.moneda, 'BS');
 
   const productor = await Productor.findByPk(productor_id);
@@ -224,6 +243,9 @@ const guardarHoja = asyncHandler(async (req, res) => {
   if (Number.isNaN(precio_litro_acida) || precio_litro_acida < 0) {
     return res.status(400).json({ success: false, message: 'El precio de la leche ácida no es válido.' });
   }
+  if (Number.isNaN(precio_litro_bajo_grasa) || precio_litro_bajo_grasa < 0) {
+    return res.status(400).json({ success: false, message: 'El precio de la leche baja en grasa no es válido.' });
+  }
   if (!Array.isArray(dias) || dias.length === 0) {
     return res.status(400).json({ success: false, message: 'No llegaron los días de la semana.' });
   }
@@ -240,13 +262,14 @@ const guardarHoja = asyncHandler(async (req, res) => {
       const fecha = String(dia.fecha);
       const litros = vacio(dia.litros) ? null : aNumero(dia.litros, NaN);
       const litros_acidos = vacio(dia.litros_acidos) ? 0 : aNumero(dia.litros_acidos, NaN);
+      const litros_bajo_grasa = vacio(dia.litros_bajo_grasa) ? 0 : aNumero(dia.litros_bajo_grasa, NaN);
 
       const existente = await RegistroLecheProductor.findOne({
         where: { productor_id: productor.id, fecha },
         transaction: transaccion,
       });
 
-      const sinNada = (litros === null || litros === 0) && litros_acidos === 0;
+      const sinNada = (litros === null || litros === 0) && litros_acidos === 0 && litros_bajo_grasa === 0;
       if (sinNada) {
         if (existente) await existente.destroy({ transaction: transaccion });
         continue;
@@ -258,9 +281,20 @@ const guardarHoja = asyncHandler(async (req, res) => {
       if (Number.isNaN(litros_acidos) || litros_acidos < 0) {
         throw Object.assign(new Error(`Litros ácidos inválidos en ${nombreDia(fecha)}.`), { status: 400 });
       }
+      if (Number.isNaN(litros_bajo_grasa) || litros_bajo_grasa < 0) {
+        throw Object.assign(new Error(`Litros bajos en grasa inválidos en ${nombreDia(fecha)}.`), { status: 400 });
+      }
       if (litros_acidos > 0 && precio_litro_acida <= 0) {
         throw Object.assign(
           new Error(`Indique el precio de la leche ácida antes de cargar litros ácidos (${nombreDia(fecha)}).`),
+          { status: 400 }
+        );
+      }
+      if (litros_bajo_grasa > 0 && precio_litro_bajo_grasa <= 0) {
+        throw Object.assign(
+          new Error(
+            `Indique el precio de la leche baja en grasa antes de cargar esos litros (${nombreDia(fecha)}).`
+          ),
           { status: 400 }
         );
       }
@@ -268,8 +302,10 @@ const guardarHoja = asyncHandler(async (req, res) => {
       const valores = {
         litros: litros === null ? 0 : litros,
         litros_acidos,
+        litros_bajo_grasa,
         precio_litro,
         precio_litro_acida,
+        precio_litro_bajo_grasa,
         moneda,
         semana_id: semana.id,
       };
@@ -367,6 +403,7 @@ const historial = asyncHandler(async (req, res) => {
       dias_con_leche: propios.length,
       total_litros: redondear(propios.reduce((acc, r) => acc + Number(r.litros), 0)),
       total_litros_acidos: redondear(propios.reduce((acc, r) => acc + Number(r.litros_acidos || 0), 0)),
+      total_litros_bajo_grasa: redondear(propios.reduce((acc, r) => acc + Number(r.litros_bajo_grasa || 0), 0)),
       total_pagar: redondear(propios.reduce((acc, r) => acc + Number(r.subtotal || 0), 0)),
       moneda: propios[0]?.moneda || 'BS',
       estado_pago: pago?.estado_pago || null,

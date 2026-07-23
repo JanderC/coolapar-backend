@@ -43,6 +43,10 @@ router.post(
       .optional({ nullable: true })
       .isFloat({ min: 0 })
       .withMessage('El precio de la leche ácida debe ser mayor o igual a 0'),
+    body('precio_litro_bajo_grasa')
+      .optional({ nullable: true })
+      .isFloat({ min: 0 })
+      .withMessage('El precio de la leche baja en grasa debe ser mayor o igual a 0'),
     body('moneda').optional().customSanitizer((v) => String(v || '').toUpperCase()).isIn(MONEDAS),
     body('dias').isArray({ min: 1 }).withMessage('Faltan los días de la semana'),
   ],

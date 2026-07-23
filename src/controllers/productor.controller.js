@@ -38,6 +38,10 @@ const normalizarCampos = (body = {}) => {
     datos.precio_litro_acida = vacio(body.precio_litro_acida) ? null : Number(body.precio_litro_acida);
   }
 
+  if (body.precio_litro_bajo_grasa !== undefined) {
+    datos.precio_litro_bajo_grasa = vacio(body.precio_litro_bajo_grasa) ? null : Number(body.precio_litro_bajo_grasa);
+  }
+
   if (body.moneda !== undefined) datos.moneda = vacio(body.moneda) ? 'BS' : String(body.moneda).toUpperCase();
 
   if (body.color_identificativo !== undefined) {
@@ -73,6 +77,12 @@ const validarDatos = async (datos, { esCreacion }) => {
   if (datos.precio_litro_acida !== undefined && datos.precio_litro_acida !== null) {
     if (Number.isNaN(datos.precio_litro_acida) || datos.precio_litro_acida < 0) {
       return 'El precio de la leche ácida debe ser un número mayor o igual a 0.';
+    }
+  }
+
+  if (datos.precio_litro_bajo_grasa !== undefined && datos.precio_litro_bajo_grasa !== null) {
+    if (Number.isNaN(datos.precio_litro_bajo_grasa) || datos.precio_litro_bajo_grasa < 0) {
+      return 'El precio de la leche baja en grasa debe ser un número mayor o igual a 0.';
     }
   }
 

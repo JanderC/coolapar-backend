@@ -30,6 +30,21 @@ module.exports = (sequelize, DataTypes) => {
         validate: { min: { args: [0], msg: 'El precio de la leche ácida no puede ser negativo.' } },
       },
 
+      // Litros bajos en grasa: misma mecánica que litros_acidos, con su
+      // propio precio independiente.
+      litros_bajo_grasa: {
+        type: DataTypes.DECIMAL(10, 2),
+        allowNull: false,
+        defaultValue: 0,
+        validate: { min: { args: [0], msg: 'Los litros bajos en grasa no pueden ser negativos.' } },
+      },
+      precio_litro_bajo_grasa: {
+        type: DataTypes.DECIMAL(10, 2),
+        allowNull: false,
+        defaultValue: 0,
+        validate: { min: { args: [0], msg: 'El precio de la leche baja en grasa no puede ser negativo.' } },
+      },
+
       // La moneda se elige al cargar la semana; no se hereda del productor.
       moneda: {
         type: DataTypes.STRING(3),
@@ -40,6 +55,7 @@ module.exports = (sequelize, DataTypes) => {
 
       // Columna calculada por Postgres:
       // GENERATED ALWAYS AS (litros*precio_litro) + (litros_acidos*precio_litro_acida)
+      //                    + (litros_bajo_grasa*precio_litro_bajo_grasa)
       // Se marca como no escribible para que Sequelize nunca la mande en el INSERT.
       subtotal: {
         type: DataTypes.DECIMAL(12, 2),
