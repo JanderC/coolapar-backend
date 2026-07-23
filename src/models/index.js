@@ -9,6 +9,8 @@ const SemanaPago = require('./semanaPago.model')(sequelize, DataTypes);
 const RegistroLecheProductor = require('./registroLecheProductor.model')(sequelize, DataTypes);
 const PagoProductor = require('./pagoProductor.model')(sequelize, DataTypes);
 const Transportador = require('./transportador.model')(sequelize, DataTypes);
+const RegistroLecheRutero = require('./registroLecheRutero.model')(sequelize, DataTypes);
+const PagoRutero = require('./pagoRutero.model')(sequelize, DataTypes);
 const FleteTransportador = require('./fleteTransportador.model')(sequelize, DataTypes);
 const Recibido = require('./recibido.model')(sequelize, DataTypes);
 const RecibidoDetalle = require('./recibidoDetalle.model')(sequelize, DataTypes);
@@ -45,6 +47,22 @@ PagoProductor.belongsTo(SemanaPago, { foreignKey: 'semana_id' });
 
 Productor.hasMany(PagoProductor, { foreignKey: 'productor_id' });
 PagoProductor.belongsTo(Productor, { foreignKey: 'productor_id' });
+
+// =========================
+// RELACIONES: RUTEROS (tabla transportadores)
+// El alias 'Rutero' es el que usan rutero.controller.js y el frontend.
+// =========================
+Transportador.hasMany(RegistroLecheRutero, { foreignKey: 'rutero_id', as: 'RegistrosLeche' });
+RegistroLecheRutero.belongsTo(Transportador, { foreignKey: 'rutero_id', as: 'Rutero' });
+
+SemanaPago.hasMany(RegistroLecheRutero, { foreignKey: 'semana_id' });
+RegistroLecheRutero.belongsTo(SemanaPago, { foreignKey: 'semana_id', as: 'Semana' });
+
+Transportador.hasMany(PagoRutero, { foreignKey: 'rutero_id', as: 'PagosRutero' });
+PagoRutero.belongsTo(Transportador, { foreignKey: 'rutero_id', as: 'Rutero' });
+
+SemanaPago.hasMany(PagoRutero, { foreignKey: 'semana_id' });
+PagoRutero.belongsTo(SemanaPago, { foreignKey: 'semana_id', as: 'Semana' });
 
 // =========================
 // RELACIONES: TRANSPORTADORES / FLETES / RECIBIDOS
@@ -106,7 +124,7 @@ Devolucion.belongsTo(Proveedor, { foreignKey: 'proveedor_id' });
 Producto.hasMany(Devolucion, { foreignKey: 'producto_id' });
 Devolucion.belongsTo(Producto, { foreignKey: 'producto_id' });
 
-// ConfiguracionSistema no tiene relaciones: es una fila unica de config global. prueba unica
+// ConfiguracionSistema no tiene relaciones: es una fila unica de config global.
 
 module.exports = {
   sequelize,
@@ -117,6 +135,8 @@ module.exports = {
   RegistroLecheProductor,
   PagoProductor,
   Transportador,
+  RegistroLecheRutero,
+  PagoRutero,
   FleteTransportador,
   Recibido,
   RecibidoDetalle,
