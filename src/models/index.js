@@ -31,7 +31,10 @@ const ConfiguracionSistema = require('./configuracionSistema.model')(sequelize, 
 // RELACIONES: RUTAS / PRODUCTORES
 // =========================
 Ruta.hasMany(Productor, { foreignKey: 'ruta_id' });
-Productor.belongsTo(Ruta, { foreignKey: 'ruta_id' });
+// Sin 'as' Sequelize singulariza "Ruta" como "Rutum" (regla latina, igual que
+// data -> datum). El alias explicito es el que usan los controladores y el
+// frontend, que lee p.Ruta.
+Productor.belongsTo(Ruta, { foreignKey: 'ruta_id', as: 'Ruta' });
 
 // =========================
 // RELACIONES: PRODUCTORES / SEMANAS / PAGOS
