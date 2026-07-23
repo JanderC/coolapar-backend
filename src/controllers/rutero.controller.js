@@ -5,10 +5,14 @@ const {
   MONEDAS,
   vacio,
   aTexto,
+  esFechaValida,
   rangoFechas,
   nombreDia,
+  diaSemana,
   esDiaValido,
   cicloVigente,
+  largoCiclo,
+  sumarDias,
   etiquetaDias,
   aNumero,
   redondear,
@@ -96,7 +100,7 @@ const eliminar = asyncHandler(async (req, res) => {
 //  Mismos días de la semana que el productor: se eligen por nombre.
 // ============================================================
 
-const resolverSemana = async (rutero, { semana_id, dia_inicio, dia_fin }) => {
+const resolverSemana = async (rutero, { semana_id, dia_inicio, dia_fin, fecha_inicio }) => {
   if (!vacio(semana_id)) {
     const semana = await SemanaPago.findByPk(semana_id);
     if (!semana) throw Object.assign(new Error('Semana no encontrada.'), { status: 404 });
@@ -106,39 +110,55 @@ const resolverSemana = async (rutero, { semana_id, dia_inicio, dia_fin }) => {
     return semana;
   }
 
-  if (!esDiaValido(dia_inicio) || !esDiaValido(dia_fin)) {
-    throw Object.assign(new Error('Indique el día en que inicia y el día en que termina.'), { status: 400 });
+  if (!esDiaValido(dia_fin)) {
+    throw Object.assign(new Error('Indique el día en que termina la semana.'), { status: 400 });
+  }
+  const fin = Number(dia_fin);
+
+  let inicio;
+  let fechaInicioTexto;
+  let fechaFinTexto;
+
+  if (!vacio(fecha_inicio)) {
+    if (!esFechaValida(fecha_inicio)) {
+      throw Object.assign(new Error('La fecha de inicio no es válida.'), { status: 400 });
+    }
+    fechaInicioTexto = fecha_inicio;
+    inicio = diaSemana(fechaInicioTexto);
+    fechaFinTexto = sumarDias(fechaInicioTexto, largoCiclo(inicio, fin) - 1);
+  } else {
+    if (!esDiaValido(dia_inicio)) {
+      throw Object.assign(new Error('Indique el día en que inicia y el día en que termina.'), { status: 400 });
+    }
+    inicio = Number(dia_inicio);
+    ({ fecha_inicio: fechaInicioTexto, fecha_fin: fechaFinTexto } = cicloVigente(inicio, fin));
   }
 
-  const inicio = Number(dia_inicio);
-  const fin = Number(dia_fin);
-  const { fecha_inicio, fecha_fin } = cicloVigente(inicio, fin);
-
-  const existente = await SemanaPago.findOne({ where: { rutero_id: rutero.id, fecha_inicio } });
+  const existente = await SemanaPago.findOne({ where: { rutero_id: rutero.id, fecha_inicio: fechaInicioTexto } });
 
   if (!existente) {
     return SemanaPago.create({
       rutero_id: rutero.id,
-      fecha_inicio,
-      fecha_fin,
+      fecha_inicio: fechaInicioTexto,
+      fecha_fin: fechaFinTexto,
       dia_inicio: inicio,
       dia_fin: fin,
       estado: 'abierta',
     });
   }
 
-  if (aTexto(existente.fecha_fin) !== fecha_fin || Number(existente.dia_fin) !== fin) {
+  if (aTexto(existente.fecha_fin) !== fechaFinTexto || Number(existente.dia_fin) !== fin) {
     if (existente.estado === 'cerrada') return existente;
 
-    if (fecha_fin < aTexto(existente.fecha_fin)) {
+    if (fechaFinTexto < aTexto(existente.fecha_fin)) {
       await RegistroLecheRutero.destroy({
         where: {
           rutero_id: rutero.id,
-          fecha: { [Op.gt]: fecha_fin, [Op.lte]: aTexto(existente.fecha_fin) },
+          fecha: { [Op.gt]: fechaFinTexto, [Op.lte]: aTexto(existente.fecha_fin) },
         },
       });
     }
-    await existente.update({ fecha_fin, dia_inicio: inicio, dia_fin: fin });
+    await existente.update({ fecha_fin: fechaFinTexto, dia_inicio: inicio, dia_fin: fin });
   }
 
   return existente;

@@ -45,6 +45,7 @@ router.get(
     query('rutero_id').isInt().withMessage('Seleccione un rutero'),
     query('dia_inicio').optional().isInt({ min: 0, max: 6 }).withMessage('Día de inicio inválido'),
     query('dia_fin').optional().isInt({ min: 0, max: 6 }).withMessage('Día de cierre inválido'),
+    query('fecha_inicio').optional().isISO8601().withMessage('Fecha de inicio inválida'),
     query('semana_id').optional().isInt(),
   ],
   validar,
