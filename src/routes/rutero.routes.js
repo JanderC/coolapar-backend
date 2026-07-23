@@ -11,6 +11,7 @@ const {
   obtenerHoja,
   guardarHoja,
   registrarPago,
+  historial,
   listarPagos,
 } = require('../controllers/rutero.controller');
 const { proteger, permitirRoles } = require('../middlewares/auth.middleware');
@@ -40,7 +41,12 @@ router.use(proteger);
 // Rutas específicas antes de '/:id'
 router.get(
   '/hoja',
-  [query('rutero_id').isInt().withMessage('Seleccione un rutero'), query('semana_id').isInt().withMessage('Seleccione una semana')],
+  [
+    query('rutero_id').isInt().withMessage('Seleccione un rutero'),
+    query('dia_inicio').optional().isInt({ min: 0, max: 6 }).withMessage('Día de inicio inválido'),
+    query('dia_fin').optional().isInt({ min: 0, max: 6 }).withMessage('Día de cierre inválido'),
+    query('semana_id').optional().isInt(),
+  ],
   validar,
   obtenerHoja
 );
@@ -49,7 +55,7 @@ router.post(
   '/hoja',
   [
     body('rutero_id').isInt().withMessage('Seleccione un rutero'),
-    body('semana_id').isInt().withMessage('Seleccione una semana'),
+    body('semana_id').isInt().withMessage('Falta la semana'),
     body('precio_litro').isFloat({ gt: 0 }).withMessage('El precio por litro debe ser mayor a 0'),
     body('moneda').optional().customSanitizer((v) => String(v || '').toUpperCase()).isIn(MONEDAS),
     body('dias').isArray({ min: 1 }).withMessage('Faltan los días de la semana'),
@@ -66,6 +72,7 @@ router.post(
   registrarPago
 );
 
+router.get('/historial', [query('rutero_id').isInt()], validar, historial);
 router.get('/pagos', listarPagos);
 
 router.get('/', listar);

@@ -7,6 +7,9 @@ const {
   aTexto,
   rangoFechas,
   nombreDia,
+  esDiaValido,
+  cicloVigente,
+  etiquetaDias,
   aNumero,
   redondear,
   normalizarMoneda,
@@ -42,7 +45,6 @@ const validarDatos = (datos, { esCreacion }) => {
   return null;
 };
 
-// @route GET /api/ruteros?activo=true
 const listar = asyncHandler(async (req, res) => {
   const where = {};
   if (req.query.activo !== undefined) where.activo = req.query.activo === 'true';
@@ -51,14 +53,12 @@ const listar = asyncHandler(async (req, res) => {
   res.json({ success: true, data: ruteros });
 });
 
-// @route GET /api/ruteros/:id
 const obtener = asyncHandler(async (req, res) => {
   const rutero = await Rutero.findByPk(req.params.id);
   if (!rutero) return res.status(404).json({ success: false, message: 'Rutero no encontrado.' });
   res.json({ success: true, data: rutero });
 });
 
-// @route POST /api/ruteros
 const crear = asyncHandler(async (req, res) => {
   const datos = normalizarCampos(req.body);
   if (datos.moneda === undefined) datos.moneda = 'COP';
@@ -71,7 +71,6 @@ const crear = asyncHandler(async (req, res) => {
   res.status(201).json({ success: true, data: rutero });
 });
 
-// @route PUT /api/ruteros/:id
 const actualizar = asyncHandler(async (req, res) => {
   const rutero = await Rutero.findByPk(req.params.id);
   if (!rutero) return res.status(404).json({ success: false, message: 'Rutero no encontrado.' });
@@ -84,7 +83,6 @@ const actualizar = asyncHandler(async (req, res) => {
   res.json({ success: true, data: rutero });
 });
 
-// @route DELETE /api/ruteros/:id
 const eliminar = asyncHandler(async (req, res) => {
   const rutero = await Rutero.findByPk(req.params.id);
   if (!rutero) return res.status(404).json({ success: false, message: 'Rutero no encontrado.' });
@@ -95,20 +93,68 @@ const eliminar = asyncHandler(async (req, res) => {
 
 // ============================================================
 //  HOJA SEMANAL DEL RUTERO
-//  Litros | Sobrante | Faltante | Descripción, igual que la libreta.
+//  Mismos días de la semana que el productor: se eligen por nombre.
 // ============================================================
 
+const resolverSemana = async (rutero, { semana_id, dia_inicio, dia_fin }) => {
+  if (!vacio(semana_id)) {
+    const semana = await SemanaPago.findByPk(semana_id);
+    if (!semana) throw Object.assign(new Error('Semana no encontrada.'), { status: 404 });
+    if (semana.rutero_id && Number(semana.rutero_id) !== Number(rutero.id)) {
+      throw Object.assign(new Error('Esa semana pertenece a otro rutero.'), { status: 400 });
+    }
+    return semana;
+  }
+
+  if (!esDiaValido(dia_inicio) || !esDiaValido(dia_fin)) {
+    throw Object.assign(new Error('Indique el día en que inicia y el día en que termina.'), { status: 400 });
+  }
+
+  const inicio = Number(dia_inicio);
+  const fin = Number(dia_fin);
+  const { fecha_inicio, fecha_fin } = cicloVigente(inicio, fin);
+
+  const existente = await SemanaPago.findOne({ where: { rutero_id: rutero.id, fecha_inicio } });
+
+  if (!existente) {
+    return SemanaPago.create({
+      rutero_id: rutero.id,
+      fecha_inicio,
+      fecha_fin,
+      dia_inicio: inicio,
+      dia_fin: fin,
+      estado: 'abierta',
+    });
+  }
+
+  if (aTexto(existente.fecha_fin) !== fecha_fin || Number(existente.dia_fin) !== fin) {
+    if (existente.estado === 'cerrada') return existente;
+
+    if (fecha_fin < aTexto(existente.fecha_fin)) {
+      await RegistroLecheRutero.destroy({
+        where: {
+          rutero_id: rutero.id,
+          fecha: { [Op.gt]: fecha_fin, [Op.lte]: aTexto(existente.fecha_fin) },
+        },
+      });
+    }
+    await existente.update({ fecha_fin, dia_inicio: inicio, dia_fin: fin });
+  }
+
+  return existente;
+};
+
 const armarHoja = async (rutero, semana) => {
-  const dias = rangoFechas(semana.fecha_inicio, semana.fecha_fin);
+  const fechas = rangoFechas(semana.fecha_inicio, semana.fecha_fin);
 
   const registros = await RegistroLecheRutero.findAll({
-    where: { rutero_id: rutero.id, fecha: { [Op.between]: [dias[0], dias[dias.length - 1]] } },
+    where: { rutero_id: rutero.id, fecha: { [Op.between]: [fechas[0], fechas[fechas.length - 1]] } },
     order: [['fecha', 'ASC']],
   });
 
   const porFecha = new Map(registros.map((r) => [aTexto(r.fecha), r]));
 
-  const filas = dias.map((fecha) => {
+  const dias = fechas.map((fecha) => {
     const r = porFecha.get(fecha);
     return {
       fecha,
@@ -121,10 +167,10 @@ const armarHoja = async (rutero, semana) => {
     };
   });
 
-  const conDatos = filas.filter((f) => f.litros !== null);
-  const total_litros = redondear(conDatos.reduce((s, f) => s + f.litros, 0));
-  const total_sobrante = redondear(filas.reduce((s, f) => s + (f.sobrante || 0), 0));
-  const total_faltante = redondear(filas.reduce((s, f) => s + (f.faltante || 0), 0));
+  const conDatos = dias.filter((d) => d.litros !== null);
+  const total_litros = redondear(conDatos.reduce((s, d) => s + d.litros, 0));
+  const total_sobrante = redondear(dias.reduce((s, d) => s + (d.sobrante || 0), 0));
+  const total_faltante = redondear(dias.reduce((s, d) => s + (d.faltante || 0), 0));
 
   const pago = await PagoRutero.findOne({ where: { rutero_id: rutero.id, semana_id: semana.id } });
 
@@ -139,10 +185,16 @@ const armarHoja = async (rutero, semana) => {
       precio_litro: Number(rutero.precio_litro || 0),
       moneda: rutero.moneda,
     },
-    semana,
+    semana: {
+      id: semana.id,
+      estado: semana.estado,
+      dia_inicio: semana.dia_inicio,
+      dia_fin: semana.dia_fin,
+      etiqueta: etiquetaDias(semana.dia_inicio, semana.dia_fin),
+    },
     precio_litro,
     moneda,
-    dias: filas,
+    dias,
     totales: {
       dias_con_leche: conDatos.length,
       total_litros,
@@ -154,20 +206,21 @@ const armarHoja = async (rutero, semana) => {
   };
 };
 
-// @route GET /api/ruteros/hoja?rutero_id=&semana_id=
+// @route GET /api/ruteros/hoja?rutero_id=&dia_inicio=&dia_fin=  (o &semana_id=)
 const obtenerHoja = asyncHandler(async (req, res) => {
   const rutero = await Rutero.findByPk(req.query.rutero_id);
   if (!rutero) return res.status(404).json({ success: false, message: 'Rutero no encontrado.' });
 
-  const semana = await SemanaPago.findByPk(req.query.semana_id);
-  if (!semana) return res.status(404).json({ success: false, message: 'Semana no encontrada.' });
-
-  res.json({ success: true, data: await armarHoja(rutero, semana) });
+  try {
+    const semana = await resolverSemana(rutero, req.query);
+    res.json({ success: true, data: await armarHoja(rutero, semana) });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ success: false, message: err.message });
+    throw err;
+  }
 });
 
 // @route POST /api/ruteros/hoja
-// body: { rutero_id, semana_id, precio_litro, moneda,
-//         dias: [{ fecha, litros, sobrante, faltante, descripcion }] }
 const guardarHoja = asyncHandler(async (req, res) => {
   const { rutero_id, semana_id, dias } = req.body;
   const precio_litro = aNumero(req.body.precio_litro, NaN);
@@ -178,10 +231,12 @@ const guardarHoja = asyncHandler(async (req, res) => {
 
   const semana = await SemanaPago.findByPk(semana_id);
   if (!semana) return res.status(404).json({ success: false, message: 'Semana no encontrada.' });
-  if (semana.estado === 'cerrada') {
-    return res.status(400).json({ success: false, message: 'La semana está cerrada. Ábrala de nuevo para editarla.' });
+  if (semana.rutero_id && Number(semana.rutero_id) !== Number(rutero.id)) {
+    return res.status(400).json({ success: false, message: 'Esa semana pertenece a otro rutero.' });
   }
-
+  if (semana.estado === 'cerrada') {
+    return res.status(400).json({ success: false, message: 'La semana está cerrada. Reábrala para editarla.' });
+  }
   if (Number.isNaN(precio_litro) || precio_litro <= 0) {
     return res.status(400).json({ success: false, message: 'Indique cuánto se le paga al rutero por litro.' });
   }
@@ -192,7 +247,7 @@ const guardarHoja = asyncHandler(async (req, res) => {
   const validas = new Set(rangoFechas(semana.fecha_inicio, semana.fecha_fin));
   const fuera = dias.find((d) => !validas.has(String(d.fecha)));
   if (fuera) {
-    return res.status(400).json({ success: false, message: `La fecha ${fuera.fecha} no pertenece a esta semana.` });
+    return res.status(400).json({ success: false, message: 'Uno de los días no pertenece a esta semana.' });
   }
 
   const transaccion = await db.sequelize.transaction();
@@ -216,7 +271,7 @@ const guardarHoja = asyncHandler(async (req, res) => {
       }
 
       if (litros !== null && (Number.isNaN(litros) || litros < 0)) {
-        throw Object.assign(new Error(`Litros inválidos en ${fecha}.`), { status: 400 });
+        throw Object.assign(new Error(`Litros inválidos en ${nombreDia(fecha)}.`), { status: 400 });
       }
 
       const valores = {
@@ -230,13 +285,9 @@ const guardarHoja = asyncHandler(async (req, res) => {
       if (existente) {
         await existente.update(valores, { transaction: transaccion });
       } else {
-        await RegistroLecheRutero.create(
-          { rutero_id: rutero.id, fecha, ...valores },
-          { transaction: transaccion }
-        );
+        await RegistroLecheRutero.create({ rutero_id: rutero.id, fecha, ...valores }, { transaction: transaccion });
       }
     }
-
     await transaccion.commit();
   } catch (err) {
     await transaccion.rollback();
@@ -244,7 +295,6 @@ const guardarHoja = asyncHandler(async (req, res) => {
     throw err;
   }
 
-  // El precio de esta semana queda guardado en el pago (aunque siga pendiente).
   const hoja = await armarHoja(rutero, semana);
   const valoresPago = {
     total_litros: hoja.totales.total_litros,
@@ -266,15 +316,13 @@ const guardarHoja = asyncHandler(async (req, res) => {
 });
 
 // @route POST /api/ruteros/hoja/pago
-// body: { rutero_id, semana_id, marcar_pagado, observaciones }
 const registrarPago = asyncHandler(async (req, res) => {
-  const { rutero_id, semana_id } = req.body;
   const marcarPagado = req.body.marcar_pagado !== false;
 
-  const rutero = await Rutero.findByPk(rutero_id);
+  const rutero = await Rutero.findByPk(req.body.rutero_id);
   if (!rutero) return res.status(404).json({ success: false, message: 'Rutero no encontrado.' });
 
-  const semana = await SemanaPago.findByPk(semana_id);
+  const semana = await SemanaPago.findByPk(req.body.semana_id);
   if (!semana) return res.status(404).json({ success: false, message: 'Semana no encontrada.' });
 
   const hoja = await armarHoja(rutero, semana);
@@ -302,14 +350,44 @@ const registrarPago = asyncHandler(async (req, res) => {
     ? await existente.update(valores)
     : await PagoRutero.create({ rutero_id: rutero.id, semana_id: semana.id, ...valores });
 
-  res.json({
-    success: true,
-    message: marcarPagado ? 'Pago registrado.' : 'Pago marcado como pendiente.',
-    data: pago,
-  });
+  res.json({ success: true, message: marcarPagado ? 'Pago registrado.' : 'Pago pendiente.', data: pago });
 });
 
-// @route GET /api/ruteros/pagos?semana_id=
+// @route GET /api/ruteros/historial?rutero_id=
+const historial = asyncHandler(async (req, res) => {
+  const rutero = await Rutero.findByPk(req.query.rutero_id);
+  if (!rutero) return res.status(404).json({ success: false, message: 'Rutero no encontrado.' });
+
+  const semanas = await SemanaPago.findAll({
+    where: { rutero_id: rutero.id },
+    order: [['fecha_inicio', 'DESC']],
+    limit: 20,
+  });
+
+  const pagos = await PagoRutero.findAll({
+    where: { rutero_id: rutero.id, semana_id: semanas.map((s) => s.id) },
+  });
+
+  const data = semanas.map((s) => {
+    const pago = pagos.find((p) => Number(p.semana_id) === Number(s.id));
+    return {
+      id: s.id,
+      estado: s.estado,
+      dia_inicio: s.dia_inicio,
+      dia_fin: s.dia_fin,
+      etiqueta: etiquetaDias(s.dia_inicio, s.dia_fin),
+      total_litros: pago ? Number(pago.total_litros) : 0,
+      total_pagar: pago ? Number(pago.total_pagar) : 0,
+      moneda: pago?.moneda || rutero.moneda,
+      estado_pago: pago?.estado_pago || null,
+      fecha_pago: pago?.fecha_pago || null,
+    };
+  });
+
+  res.json({ success: true, data });
+});
+
+// @route GET /api/ruteros/pagos?semana_id=&rutero_id=
 const listarPagos = asyncHandler(async (req, res) => {
   const where = {};
   if (!vacio(req.query.semana_id)) where.semana_id = Number(req.query.semana_id);
@@ -333,5 +411,6 @@ module.exports = {
   obtenerHoja,
   guardarHoja,
   registrarPago,
+  historial,
   listarPagos,
 };

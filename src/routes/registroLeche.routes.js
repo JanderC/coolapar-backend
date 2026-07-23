@@ -3,16 +3,12 @@ const { body, param, query } = require('express-validator');
 const router = express.Router();
 
 const {
-  listarSemanas,
-  abrirSemana,
-  cerrarSemana,
   obtenerHoja,
   guardarHoja,
   registrarPago,
-  resumenSemana,
+  historial,
+  cambiarEstadoSemana,
   listar,
-  crear,
-  actualizar,
   eliminar,
 } = require('../controllers/registroLeche.controller');
 const { proteger, permitirRoles } = require('../middlewares/auth.middleware');
@@ -22,25 +18,16 @@ const MONEDAS = ['BS', 'USD', 'COP'];
 
 router.use(proteger);
 
-// ---- Semanas ----
-router.get('/semanas', listarSemanas);
-
-router.post(
-  '/semanas',
-  [
-    body('fecha_inicio').isISO8601().withMessage('Fecha de inicio inválida'),
-    body('fecha_fin').isISO8601().withMessage('Fecha de cierre inválida'),
-  ],
-  validar,
-  abrirSemana
-);
-
-router.patch('/semanas/:id/cerrar', [param('id').isInt()], validar, cerrarSemana);
-
-// ---- Hoja semanal (rutas específicas antes de '/:id') ----
+// La hoja se pide por días de la semana (dia_inicio/dia_fin) o por semana_id
+// cuando se reabre una del historial.
 router.get(
   '/hoja',
-  [query('productor_id').isInt().withMessage('Seleccione un productor'), query('semana_id').isInt().withMessage('Seleccione una semana')],
+  [
+    query('productor_id').isInt().withMessage('Seleccione un productor'),
+    query('dia_inicio').optional().isInt({ min: 0, max: 6 }).withMessage('Día de inicio inválido'),
+    query('dia_fin').optional().isInt({ min: 0, max: 6 }).withMessage('Día de cierre inválido'),
+    query('semana_id').optional().isInt(),
+  ],
   validar,
   obtenerHoja
 );
@@ -49,7 +36,7 @@ router.post(
   '/hoja',
   [
     body('productor_id').isInt().withMessage('Seleccione un productor'),
-    body('semana_id').isInt().withMessage('Seleccione una semana'),
+    body('semana_id').isInt().withMessage('Falta la semana'),
     body('precio_litro').isFloat({ gt: 0 }).withMessage('El precio por litro debe ser mayor a 0'),
     body('moneda').optional().customSanitizer((v) => String(v || '').toUpperCase()).isIn(MONEDAS),
     body('dias').isArray({ min: 1 }).withMessage('Faltan los días de la semana'),
@@ -66,26 +53,11 @@ router.post(
   registrarPago
 );
 
-router.get('/resumen', [query('semana_id').isInt()], validar, resumenSemana);
+router.get('/historial', [query('productor_id').isInt()], validar, historial);
 
-// ---- Registros sueltos ----
+router.patch('/semanas/:id/estado', [param('id').isInt()], validar, cambiarEstadoSemana);
+
 router.get('/', listar);
-
-router.post(
-  '/',
-  [
-    body('productor_id').isInt().withMessage('productor_id es obligatorio'),
-    body('semana_id').isInt().withMessage('semana_id es obligatorio'),
-    body('fecha').isISO8601().withMessage('Fecha inválida'),
-    body('litros').isFloat({ gt: 0 }).withMessage('Los litros deben ser mayores a 0'),
-    body('precio_litro').optional().isFloat({ gt: 0 }).withMessage('Precio por litro inválido'),
-    body('moneda').optional().customSanitizer((v) => String(v || '').toUpperCase()).isIn(MONEDAS),
-  ],
-  validar,
-  crear
-);
-
-router.put('/:id', [param('id').isInt()], validar, actualizar);
 router.delete('/:id', permitirRoles('admin', 'contabilidad'), [param('id').isInt()], validar, eliminar);
 
 module.exports = router;
