@@ -37,7 +37,12 @@ router.post(
   '/hoja',
   [
     body('productor_id').isInt().withMessage('Seleccione un productor'),
-    body('semana_id').isInt().withMessage('Falta la semana'),
+    // O bien semana_id (reabrir una guardada), o bien fecha_inicio + dia_fin
+    // (crear/actualizar). El controlador valida la combinación exacta.
+    body('semana_id').optional({ nullable: true }).isInt().withMessage('Semana inválida'),
+    body('fecha_inicio').optional({ nullable: true }).isISO8601().withMessage('Fecha de inicio inválida'),
+    body('dia_inicio').optional({ nullable: true }).isInt({ min: 0, max: 6 }).withMessage('Día de inicio inválido'),
+    body('dia_fin').optional({ nullable: true }).isInt({ min: 0, max: 6 }).withMessage('Día de cierre inválido'),
     body('precio_litro').isFloat({ gt: 0 }).withMessage('El precio por litro debe ser mayor a 0'),
     body('precio_litro_acida')
       .optional({ nullable: true })

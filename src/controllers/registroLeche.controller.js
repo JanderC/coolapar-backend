@@ -36,15 +36,63 @@ const incluirProductor = {
 };
 
 // ============================================================
-//  RESOLUCIÓN DE LA SEMANA DEL PRODUCTOR
-//  El usuario elige días (lunes a miércoles). Las fechas se calculan
-//  solas sobre el ciclo en curso y no se muestran en pantalla.
+//  SEMANA DEL PRODUCTOR — consultar NUNCA escribe en la base de datos.
+//  Solo "Guardar semana" crea o modifica la fila de semanas_pago.
+//  Esto evita las "semanas fantasma": antes, con solo abrir o cambiar
+//  la fecha en pantalla ya se creaba un registro en la base de datos,
+//  aunque el usuario no hubiera guardado nada todavía.
 // ============================================================
 
-const resolverSemana = async (productor, { semana_id, dia_inicio, dia_fin, fecha_inicio }) => {
-  // Reabrir una semana ya guardada del historial.
-  if (!vacio(semana_id)) {
-    const semana = await SemanaPago.findByPk(semana_id);
+/** Calcula fecha de inicio/fin y día de inicio/fin a partir de los
+ * parámetros que manda el frontend, sin tocar la base de datos. */
+const calcularCiclo = ({ dia_inicio, dia_fin, fecha_inicio }) => {
+  if (!esDiaValido(dia_fin)) {
+    throw Object.assign(new Error('Indique el día en que termina la semana.'), { status: 400 });
+  }
+  const fin = Number(dia_fin);
+
+  // Fecha exacta elegida a mano: el día de inicio se calcula solo a partir de ella.
+  if (!vacio(fecha_inicio)) {
+    if (!esFechaValida(fecha_inicio)) {
+      throw Object.assign(new Error('La fecha de inicio no es válida.'), { status: 400 });
+    }
+    const inicio = diaSemana(fecha_inicio);
+    const fechaFin = sumarDias(fecha_inicio, largoCiclo(inicio, fin) - 1);
+    return { inicio, fin, fechaInicioTexto: fecha_inicio, fechaFinTexto: fechaFin };
+  }
+
+  if (!esDiaValido(dia_inicio)) {
+    throw Object.assign(new Error('Indique el día en que inicia y el día en que termina.'), { status: 400 });
+  }
+  const inicio = Number(dia_inicio);
+  const { fecha_inicio: fechaInicioTexto, fecha_fin: fechaFinTexto } = cicloVigente(inicio, fin);
+  return { inicio, fin, fechaInicioTexto, fechaFinTexto };
+};
+
+/** Objeto de semana "en memoria", sin persistir: se usa para previsualizar
+ * una semana que el productor todavía no ha guardado ninguna vez. */
+const semanaVirtual = ({ productor_id, fechaInicioTexto, fechaFinTexto, inicio, fin }) => ({
+  id: null,
+  productor_id,
+  fecha_inicio: fechaInicioTexto,
+  fecha_fin: fechaFinTexto,
+  dia_inicio: inicio,
+  dia_fin: fin,
+  estado: 'abierta',
+});
+
+/**
+ * SOLO LECTURA. Busca la semana que corresponde a los parámetros pedidos,
+ * sin crear ni modificar nada en la base de datos.
+ *  - Si viene semana_id: la trae tal cual está guardada (reabrir historial).
+ *  - Si viene fecha_inicio/día: busca por (productor, fecha_inicio).
+ *    Si existe y está abierta, se previsualiza con el día de cierre pedido
+ *    (sin guardar el cambio). Si no existe ninguna, se arma una semana
+ *    virtual (id: null) solo para mostrar en pantalla.
+ */
+const previsualizarSemana = async (productor, query) => {
+  if (!vacio(query.semana_id)) {
+    const semana = await SemanaPago.findByPk(query.semana_id);
     if (!semana) throw Object.assign(new Error('Semana no encontrada.'), { status: 404 });
     if (semana.productor_id && Number(semana.productor_id) !== Number(productor.id)) {
       throw Object.assign(new Error('Esa semana pertenece a otro productor.'), { status: 400 });
@@ -52,30 +100,46 @@ const resolverSemana = async (productor, { semana_id, dia_inicio, dia_fin, fecha
     return semana;
   }
 
-  if (!esDiaValido(dia_fin)) {
-    throw Object.assign(new Error('Indique el día en que termina la semana.'), { status: 400 });
-  }
-  const fin = Number(dia_fin);
+  const { inicio, fin, fechaInicioTexto, fechaFinTexto } = calcularCiclo(query);
 
-  let inicio;
-  let fechaInicioTexto;
-  let fechaFinTexto;
+  const existente = await SemanaPago.findOne({
+    where: { productor_id: productor.id, fecha_inicio: fechaInicioTexto },
+  });
 
-  // Fecha exacta elegida a mano: el día de inicio se calcula solo a partir de ella.
-  if (!vacio(fecha_inicio)) {
-    if (!esFechaValida(fecha_inicio)) {
-      throw Object.assign(new Error('La fecha de inicio no es válida.'), { status: 400 });
-    }
-    fechaInicioTexto = fecha_inicio;
-    inicio = diaSemana(fechaInicioTexto);
-    fechaFinTexto = sumarDias(fechaInicioTexto, largoCiclo(inicio, fin) - 1);
-  } else {
-    if (!esDiaValido(dia_inicio)) {
-      throw Object.assign(new Error('Indique el día en que inicia y el día en que termina.'), { status: 400 });
-    }
-    inicio = Number(dia_inicio);
-    ({ fecha_inicio: fechaInicioTexto, fecha_fin: fechaFinTexto } = cicloVigente(inicio, fin));
+  if (!existente) {
+    return semanaVirtual({ productor_id: productor.id, fechaInicioTexto, fechaFinTexto, inicio, fin });
   }
+
+  // Semana cerrada: se muestra tal cual quedó guardada, sin importar lo
+  // que el usuario esté probando a cambiar en pantalla.
+  if (existente.estado === 'cerrada') return existente;
+
+  // Semana abierta ya guardada: se previsualiza con el día de cierre que
+  // el usuario está pidiendo ahora mismo, PERO sin escribir el cambio.
+  // Solo queda firme si después presiona "Guardar semana".
+  return {
+    ...existente.toJSON(),
+    fecha_fin: fechaFinTexto,
+    dia_fin: fin,
+  };
+};
+
+/**
+ * ÚNICO lugar que crea o modifica una fila de semanas_pago. Se llama
+ * exclusivamente desde "Guardar semana" (POST /hoja) y desde el registro
+ * de pago, nunca desde una consulta de lectura.
+ */
+const confirmarSemana = async (productor, body) => {
+  if (!vacio(body.semana_id)) {
+    const semana = await SemanaPago.findByPk(body.semana_id);
+    if (!semana) throw Object.assign(new Error('Semana no encontrada.'), { status: 404 });
+    if (semana.productor_id && Number(semana.productor_id) !== Number(productor.id)) {
+      throw Object.assign(new Error('Esa semana pertenece a otro productor.'), { status: 400 });
+    }
+    return semana;
+  }
+
+  const { inicio, fin, fechaInicioTexto, fechaFinTexto } = calcularCiclo(body);
 
   const existente = await SemanaPago.findOne({
     where: { productor_id: productor.id, fecha_inicio: fechaInicioTexto },
@@ -92,10 +156,12 @@ const resolverSemana = async (productor, { semana_id, dia_inicio, dia_fin, fecha
     });
   }
 
-  // Si cambió el día de cierre, se ajusta el ciclo.
-  if (aTexto(existente.fecha_fin) !== fechaFinTexto || Number(existente.dia_fin) !== fin) {
-    if (existente.estado === 'cerrada') return existente;
+  if (existente.estado === 'cerrada') {
+    throw Object.assign(new Error('La semana está cerrada. Reábrala para editarla.'), { status: 400 });
+  }
 
+  // Si cambió el día de cierre, se ajusta el ciclo (aquí sí se guarda).
+  if (aTexto(existente.fecha_fin) !== fechaFinTexto || Number(existente.dia_fin) !== fin) {
     // Al acortar la semana se eliminan los días que quedaron por fuera.
     if (fechaFinTexto < aTexto(existente.fecha_fin)) {
       await RegistroLecheProductor.destroy({
@@ -145,6 +211,15 @@ const armarHoja = async (productor, semana) => {
   const total_litros = redondear(conDatos.reduce((s, d) => s + d.litros, 0));
   const total_litros_acidos = redondear(conDatos.reduce((s, d) => s + (d.litros_acidos || 0), 0));
   const total_litros_bajo_grasa = redondear(conDatos.reduce((s, d) => s + (d.litros_bajo_grasa || 0), 0));
+
+  // Subtotales separados por categoría, además del total general.
+  const total_pagar_normal = redondear(conDatos.reduce((s, d) => s + d.litros * (d.precio_litro || 0), 0));
+  const total_pagar_acida = redondear(
+    conDatos.reduce((s, d) => s + (d.litros_acidos || 0) * (d.precio_litro_acida || 0), 0)
+  );
+  const total_pagar_bajo_grasa = redondear(
+    conDatos.reduce((s, d) => s + (d.litros_bajo_grasa || 0) * (d.precio_litro_bajo_grasa || 0), 0)
+  );
   const total_pagar = redondear(conDatos.reduce((s, d) => s + d.subtotal, 0));
 
   const precio_litro = conDatos.length
@@ -160,9 +235,11 @@ const armarHoja = async (productor, semana) => {
     ? conDatos[conDatos.length - 1].moneda
     : normalizarMoneda(productor.moneda, 'BS');
 
-  const pago = PagoProductor
-    ? await PagoProductor.findOne({ where: { productor_id: productor.id, semana_id: semana.id } })
-    : null;
+  // Sin id persistido no hay pago posible: la semana todavía no existe.
+  const pago =
+    PagoProductor && semana.id
+      ? await PagoProductor.findOne({ where: { productor_id: productor.id, semana_id: semana.id } })
+      : null;
 
   return {
     productor: {
@@ -176,6 +253,7 @@ const armarHoja = async (productor, semana) => {
     },
     semana: {
       id: semana.id,
+      guardada: semana.id !== null,
       estado: semana.estado,
       dia_inicio: semana.dia_inicio,
       dia_fin: semana.dia_fin,
@@ -191,21 +269,24 @@ const armarHoja = async (productor, semana) => {
       total_litros,
       total_litros_acidos,
       total_litros_bajo_grasa,
+      total_pagar_normal,
+      total_pagar_acida,
+      total_pagar_bajo_grasa,
       total_pagar,
     },
     pago,
   };
 };
 
-// @desc  Hoja de la semana de un productor
-// @route GET /api/registros-leche/hoja?productor_id=&dia_inicio=&dia_fin=
+// @desc  Hoja de la semana de un productor (solo lectura, no crea nada)
+// @route GET /api/registros-leche/hoja?productor_id=&fecha_inicio=&dia_fin=
 //        GET /api/registros-leche/hoja?productor_id=&semana_id=   (historial)
 const obtenerHoja = asyncHandler(async (req, res) => {
   const productor = await Productor.findByPk(req.query.productor_id);
   if (!productor) return res.status(404).json({ success: false, message: 'Productor no encontrado.' });
 
   try {
-    const semana = await resolverSemana(productor, req.query);
+    const semana = await previsualizarSemana(productor, req.query);
     res.json({ success: true, data: await armarHoja(productor, semana) });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ success: false, message: err.message });
@@ -213,12 +294,14 @@ const obtenerHoja = asyncHandler(async (req, res) => {
   }
 });
 
-// @desc  Guardar los litros de la semana
+// @desc  Guardar los litros de la semana. Es el ÚNICO momento en que se
+// crea o actualiza la fila de semanas_pago.
 // @route POST /api/registros-leche/hoja
-// body: { productor_id, semana_id, precio_litro, precio_litro_acida, precio_litro_bajo_grasa, moneda,
+// body: { productor_id, semana_id?, fecha_inicio?, dia_fin?,
+//         precio_litro, precio_litro_acida, precio_litro_bajo_grasa, moneda,
 //         dias: [{ fecha, litros, litros_acidos, litros_bajo_grasa }] }
 const guardarHoja = asyncHandler(async (req, res) => {
-  const { productor_id, semana_id, dias } = req.body;
+  const { productor_id, dias } = req.body;
   const precio_litro = aNumero(req.body.precio_litro, NaN);
   // La leche ácida y la baja en grasa son opcionales: si el productor
   // nunca trae, se quedan en 0.
@@ -229,14 +312,6 @@ const guardarHoja = asyncHandler(async (req, res) => {
   const productor = await Productor.findByPk(productor_id);
   if (!productor) return res.status(404).json({ success: false, message: 'Productor no encontrado.' });
 
-  const semana = await SemanaPago.findByPk(semana_id);
-  if (!semana) return res.status(404).json({ success: false, message: 'Semana no encontrada.' });
-  if (semana.productor_id && Number(semana.productor_id) !== Number(productor.id)) {
-    return res.status(400).json({ success: false, message: 'Esa semana pertenece a otro productor.' });
-  }
-  if (semana.estado === 'cerrada') {
-    return res.status(400).json({ success: false, message: 'La semana está cerrada. Reábrala para editarla.' });
-  }
   if (Number.isNaN(precio_litro) || precio_litro <= 0) {
     return res.status(400).json({ success: false, message: 'Indique el precio por litro de esta semana.' });
   }
@@ -248,6 +323,15 @@ const guardarHoja = asyncHandler(async (req, res) => {
   }
   if (!Array.isArray(dias) || dias.length === 0) {
     return res.status(400).json({ success: false, message: 'No llegaron los días de la semana.' });
+  }
+
+  let semana;
+  try {
+    // Aquí, y solo aquí, se crea o actualiza semanas_pago.
+    semana = await confirmarSemana(productor, req.body);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ success: false, message: err.message });
+    throw err;
   }
 
   const validas = new Set(rangoFechas(semana.fecha_inicio, semana.fecha_fin));
@@ -329,7 +413,9 @@ const guardarHoja = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Semana guardada.', data: await armarHoja(productor, semana) });
 });
 
-// @desc  Registrar el pago de la semana
+// @desc  Registrar el pago de la semana. También puede crear la semana si
+// todavía no existía (se guardan primero los litros en el frontend antes
+// de llamar aquí, pero por si acaso se resuelve igual que al guardar).
 // @route POST /api/registros-leche/hoja/pago
 const registrarPago = asyncHandler(async (req, res) => {
   if (!PagoProductor) {
@@ -340,6 +426,10 @@ const registrarPago = asyncHandler(async (req, res) => {
 
   const productor = await Productor.findByPk(req.body.productor_id);
   if (!productor) return res.status(404).json({ success: false, message: 'Productor no encontrado.' });
+
+  if (vacio(req.body.semana_id)) {
+    return res.status(400).json({ success: false, message: 'Falta indicar la semana.' });
+  }
 
   const semana = await SemanaPago.findByPk(req.body.semana_id);
   if (!semana) return res.status(404).json({ success: false, message: 'Semana no encontrada.' });
@@ -369,7 +459,9 @@ const registrarPago = asyncHandler(async (req, res) => {
   res.json({ success: true, message: marcarPagado ? 'Pago registrado.' : 'Pago pendiente.', data: pago });
 });
 
-// @desc  Semanas anteriores de un productor, paginadas
+// @desc  Semanas anteriores de un productor, paginadas.
+// Como ahora solo se crea semanas_pago al guardar, aquí nunca aparecen
+// semanas vacías creadas por accidente al navegar/consultar.
 // @route GET /api/registros-leche/historial?productor_id=&pagina=1&por_pagina=10
 const historial = asyncHandler(async (req, res) => {
   const productor = await Productor.findByPk(req.query.productor_id);
@@ -411,6 +503,18 @@ const historial = asyncHandler(async (req, res) => {
       total_litros: redondear(propios.reduce((acc, r) => acc + Number(r.litros), 0)),
       total_litros_acidos: redondear(propios.reduce((acc, r) => acc + Number(r.litros_acidos || 0), 0)),
       total_litros_bajo_grasa: redondear(propios.reduce((acc, r) => acc + Number(r.litros_bajo_grasa || 0), 0)),
+      total_pagar_normal: redondear(
+        propios.reduce((acc, r) => acc + Number(r.litros) * Number(r.precio_litro || 0), 0)
+      ),
+      total_pagar_acida: redondear(
+        propios.reduce((acc, r) => acc + Number(r.litros_acidos || 0) * Number(r.precio_litro_acida || 0), 0)
+      ),
+      total_pagar_bajo_grasa: redondear(
+        propios.reduce(
+          (acc, r) => acc + Number(r.litros_bajo_grasa || 0) * Number(r.precio_litro_bajo_grasa || 0),
+          0
+        )
+      ),
       total_pagar: redondear(propios.reduce((acc, r) => acc + Number(r.subtotal || 0), 0)),
       moneda: propios[0]?.moneda || 'BS',
       estado_pago: pago?.estado_pago || null,
