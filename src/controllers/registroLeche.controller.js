@@ -369,34 +369,41 @@ const registrarPago = asyncHandler(async (req, res) => {
   res.json({ success: true, message: marcarPagado ? 'Pago registrado.' : 'Pago pendiente.', data: pago });
 });
 
-// @desc  Semanas anteriores de un productor
-// @route GET /api/registros-leche/historial?productor_id=
+// @desc  Semanas anteriores de un productor, paginadas
+// @route GET /api/registros-leche/historial?productor_id=&pagina=1&por_pagina=10
 const historial = asyncHandler(async (req, res) => {
   const productor = await Productor.findByPk(req.query.productor_id);
   if (!productor) return res.status(404).json({ success: false, message: 'Productor no encontrado.' });
 
-  const semanas = await SemanaPago.findAll({
+  const pagina = Math.max(1, aNumero(req.query.pagina, 1));
+  const porPagina = Math.min(50, Math.max(1, aNumero(req.query.por_pagina, 10)));
+
+  const { rows: semanas, count: total } = await SemanaPago.findAndCountAll({
     where: { productor_id: productor.id },
     order: [['fecha_inicio', 'DESC']],
-    limit: 20,
+    limit: porPagina,
+    offset: (pagina - 1) * porPagina,
   });
 
-  const registros = await RegistroLecheProductor.findAll({
-    where: { productor_id: productor.id, semana_id: semanas.map((s) => s.id) },
-  });
+  const idsSemanas = semanas.map((s) => s.id);
 
-  const pagos = PagoProductor
-    ? await PagoProductor.findAll({
-        where: { productor_id: productor.id, semana_id: semanas.map((s) => s.id) },
-      })
+  const registros = idsSemanas.length
+    ? await RegistroLecheProductor.findAll({ where: { productor_id: productor.id, semana_id: idsSemanas } })
     : [];
 
-  const data = semanas.map((s) => {
+  const pagos =
+    PagoProductor && idsSemanas.length
+      ? await PagoProductor.findAll({ where: { productor_id: productor.id, semana_id: idsSemanas } })
+      : [];
+
+  const semanasData = semanas.map((s) => {
     const propios = registros.filter((r) => Number(r.semana_id) === Number(s.id));
     const pago = pagos.find((p) => Number(p.semana_id) === Number(s.id));
     return {
       id: s.id,
       estado: s.estado,
+      fecha_inicio: aTexto(s.fecha_inicio),
+      fecha_fin: aTexto(s.fecha_fin),
       dia_inicio: s.dia_inicio,
       dia_fin: s.dia_fin,
       etiqueta: etiquetaDias(s.dia_inicio, s.dia_fin),
@@ -411,7 +418,18 @@ const historial = asyncHandler(async (req, res) => {
     };
   });
 
-  res.json({ success: true, data });
+  res.json({
+    success: true,
+    data: {
+      semanas: semanasData,
+      paginacion: {
+        pagina,
+        por_pagina: porPagina,
+        total,
+        total_paginas: Math.max(1, Math.ceil(total / porPagina)),
+      },
+    },
+  });
 });
 
 // @desc  Cerrar o reabrir la semana

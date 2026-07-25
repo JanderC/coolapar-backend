@@ -62,7 +62,16 @@ router.post(
   registrarPago
 );
 
-router.get('/historial', [query('productor_id').isInt()], validar, historial);
+router.get(
+  '/historial',
+  [
+    query('productor_id').isInt(),
+    query('pagina').optional().isInt({ min: 1 }),
+    query('por_pagina').optional().isInt({ min: 1, max: 50 }),
+  ],
+  validar,
+  historial
+);
 
 router.patch('/semanas/:id/estado', [param('id').isInt()], validar, cambiarEstadoSemana);
 
