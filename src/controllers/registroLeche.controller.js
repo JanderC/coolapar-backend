@@ -55,6 +55,82 @@ const error400 = (mensaje) => Object.assign(new Error(mensaje), { status: 400 })
 const error404 = (mensaje) => Object.assign(new Error(mensaje), { status: 404 });
 const error409 = (mensaje) => Object.assign(new Error(mensaje), { status: 409 });
 
+// ------------------------------------------------------------
+//  semanas_pago NO es exclusiva de los productores: el módulo de
+//  ruteros (y cualquier otro que se agregue) cuelga sus registros de la
+//  misma fila. Por eso, antes de borrar una semana hay que preguntarle a
+//  la base quién más la está usando. Si no, Postgres corta la operación
+//  con un error de clave foránea y, peor, se podrían borrar los datos de
+//  otro módulo.
+// ------------------------------------------------------------
+
+const NOMBRE_TABLA_SEMANAS = String(SemanaPago.getTableName());
+const NOMBRE_TABLA_REGISTROS = String(RegistroLecheProductor.getTableName());
+const NOMBRE_TABLA_PAGOS = PagoProductor ? String(PagoProductor.getTableName()) : null;
+
+// Nombres legibles para los mensajes de error.
+const MODULOS = {
+  registro_leche_rutero: 'registro de ruteros',
+  registro_leche_ruteros: 'registro de ruteros',
+  inventario_insumos: 'inventario de insumos',
+  pagos_ruteros: 'pagos a ruteros',
+};
+
+const nombreModulo = (tabla) => MODULOS[tabla] || tabla;
+
+let cacheReferencias = null;
+
+/** Tablas y columnas que apuntan a semanas_pago, leídas del catálogo de
+ * Postgres. Se consulta una sola vez por proceso. */
+const tablasQueReferencianSemanas = async () => {
+  if (cacheReferencias) return cacheReferencias;
+
+  const filas = await db.sequelize.query(
+    `SELECT origen.relname AS tabla, atributo.attname AS columna
+       FROM pg_constraint restriccion
+       JOIN pg_class origen  ON origen.oid  = restriccion.conrelid
+       JOIN pg_class destino ON destino.oid = restriccion.confrelid
+       JOIN unnest(restriccion.conkey) AS clave(attnum) ON TRUE
+       JOIN pg_attribute atributo
+         ON atributo.attrelid = origen.oid AND atributo.attnum = clave.attnum
+      WHERE restriccion.contype = 'f'
+        AND destino.relname = :tabla`,
+    { replacements: { tabla: NOMBRE_TABLA_SEMANAS }, type: db.Sequelize.QueryTypes.SELECT }
+  );
+
+  // Las del propio módulo de productores sí se borran en cascada manual.
+  cacheReferencias = filas.filter(
+    (f) => f.tabla !== NOMBRE_TABLA_REGISTROS && f.tabla !== NOMBRE_TABLA_PAGOS
+  );
+  return cacheReferencias;
+};
+
+/** Módulos ajenos que todavía tienen datos colgando de esta semana. */
+const usosAjenos = async (semanaId) => {
+  let referencias;
+  try {
+    referencias = await tablasQueReferencianSemanas();
+  } catch {
+    // Si el catálogo no se puede leer (otro motor, permisos), se prefiere
+    // no borrar nada a borrar de más.
+    return [{ tabla: 'desconocido', filas: 0, incierto: true }];
+  }
+
+  const usos = [];
+  for (const referencia of referencias) {
+    const filas = await db.sequelize.query(
+      `SELECT COUNT(*)::int AS total FROM "${referencia.tabla}" WHERE "${referencia.columna}" = :id`,
+      { replacements: { id: semanaId }, type: db.Sequelize.QueryTypes.SELECT }
+    );
+    const total = Number(filas[0]?.total || 0);
+    if (total > 0) usos.push({ tabla: referencia.tabla, filas: total });
+  }
+  return usos;
+};
+
+const textoUsos = (usos) =>
+  usos.map((u) => (u.incierto ? 'otro módulo' : `${nombreModulo(u.tabla)} (${u.filas} registro(s))`)).join(', ');
+
 /** Calcula fecha de inicio/fin y día de inicio/fin a partir de los
  * parámetros que manda el frontend, sin tocar la base de datos. */
 const calcularCiclo = ({ dia_inicio, dia_fin, fecha_inicio, fecha_fin }) => {
@@ -234,14 +310,25 @@ const confirmarSemana = async (productor, body, { permitirCrear }) => {
   return solapada;
 };
 
-/** Borra una semana con todo lo que cuelga de ella. */
-const borrarSemanaCompleta = async (semana, transaccion = null) => {
-  const opciones = transaccion ? { transaction: transaccion } : {};
-  await RegistroLecheProductor.destroy({ where: { semana_id: semana.id }, ...opciones });
-  if (PagoProductor) {
-    await PagoProductor.destroy({ where: { semana_id: semana.id }, ...opciones });
+/**
+ * Borra una semana con los días y el pago del productor.
+ * Si otro módulo (ruteros, insumos...) todavía cuelga de esa misma semana,
+ * NO se borra: se lanza un 409 explicando quién la está usando.
+ */
+const borrarSemanaCompleta = async (semana) => {
+  const usos = await usosAjenos(semana.id);
+  if (usos.length > 0) {
+    throw error409(
+      `No se puede eliminar esta semana porque la está usando el ${textoUsos(usos)}. ` +
+        'Borre primero esos registros desde su módulo.'
+    );
   }
-  await semana.destroy(opciones);
+
+  await RegistroLecheProductor.destroy({ where: { semana_id: semana.id } });
+  if (PagoProductor) {
+    await PagoProductor.destroy({ where: { semana_id: semana.id } });
+  }
+  await semana.destroy();
 };
 
 const armarHoja = async (productor, semana) => {
@@ -491,7 +578,19 @@ const guardarHoja = asyncHandler(async (req, res) => {
     const fin = aTexto(semana.fecha_fin);
     const dia_inicio = semana.dia_inicio;
     const dia_fin = semana.dia_fin;
-    await borrarSemanaCompleta(semana);
+
+    try {
+      await borrarSemanaCompleta(semana);
+    } catch (err) {
+      // La semana la comparte otro módulo: se deja en pie, solo que sin
+      // litros del productor. No es un error para quien está cargando.
+      if (err.status !== 409) throw err;
+      return res.json({
+        success: true,
+        message: 'La semana quedó sin litros. Se conserva porque la usa otro módulo.',
+        data: await armarHoja(productor, semana),
+      });
+    }
 
     const hojaVacia = await armarHoja(
       productor,
@@ -674,18 +773,36 @@ const limpiarSemanasVacias = asyncHandler(async (req, res) => {
   });
   const ocupadas = new Set(conLitros.map((r) => Number(r.semana_id)));
 
-  const vacias = semanas.filter((s) => !ocupadas.has(Number(s.id)));
-  for (const semana of vacias) {
-    await borrarSemanaCompleta(semana);
+  const candidatas = semanas.filter((s) => !ocupadas.has(Number(s.id)));
+
+  let eliminadas = 0;
+  const conservadas = [];
+  for (const semana of candidatas) {
+    try {
+      await borrarSemanaCompleta(semana);
+      eliminadas += 1;
+    } catch (err) {
+      // Semana compartida con ruteros u otro módulo: se respeta.
+      if (err.status !== 409) throw err;
+      conservadas.push(`${aTexto(semana.fecha_inicio)} a ${aTexto(semana.fecha_fin)}`);
+    }
   }
+
+  const partes = [];
+  if (eliminadas > 0) partes.push(`Se eliminaron ${eliminadas} semana(s) sin litros cargados.`);
+  if (conservadas.length > 0) {
+    partes.push(
+      `Se conservaron ${conservadas.length} porque las usa otro módulo (${conservadas.slice(0, 3).join('; ')}${
+        conservadas.length > 3 ? '…' : ''
+      }).`
+    );
+  }
+  if (partes.length === 0) partes.push('No había semanas vacías.');
 
   res.json({
     success: true,
-    message:
-      vacias.length === 0
-        ? 'No había semanas vacías.'
-        : `Se eliminaron ${vacias.length} semana(s) sin litros cargados.`,
-    data: { eliminadas: vacias.length },
+    message: partes.join(' '),
+    data: { eliminadas, conservadas: conservadas.length },
   });
 });
 
@@ -696,6 +813,16 @@ const eliminarSemana = asyncHandler(async (req, res) => {
   if (!semana) return res.status(404).json({ success: false, message: 'Semana no encontrada.' });
 
   const forzar = String(req.query.forzar || '') === 'true';
+
+  // Primero: ¿la comparte otro módulo? Eso no se salta ni con forzar.
+  const usos = await usosAjenos(semana.id);
+  if (usos.length > 0) {
+    return res.status(409).json({
+      success: false,
+      message: `No se puede eliminar esta semana porque la está usando el ${textoUsos(usos)}. Borre primero esos registros desde su módulo.`,
+      data: { compartida: true, usos },
+    });
+  }
 
   const pago = PagoProductor
     ? await PagoProductor.findOne({ where: { semana_id: semana.id } })
@@ -709,7 +836,13 @@ const eliminarSemana = asyncHandler(async (req, res) => {
     });
   }
 
-  await borrarSemanaCompleta(semana);
+  try {
+    await borrarSemanaCompleta(semana);
+  } catch (err) {
+    if (err.status === 409) return res.status(409).json({ success: false, message: err.message });
+    throw err;
+  }
+
   res.json({ success: true, message: 'Semana eliminada del historial.' });
 });
 
