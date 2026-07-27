@@ -8,6 +8,8 @@ const {
   registrarPago,
   historial,
   cambiarEstadoSemana,
+  limpiarSemanasVacias,
+  eliminarSemana,
   listar,
   eliminar,
 } = require('../controllers/registroLeche.controller');
@@ -18,8 +20,11 @@ const MONEDAS = ['BS', 'USD', 'COP'];
 
 router.use(proteger);
 
-// La hoja se pide por días de la semana (dia_inicio/dia_fin) o por semana_id
-// cuando se reabre una del historial.
+// La hoja se pide de tres formas:
+//   - semana_id: reabrir una semana del historial, tal cual quedó guardada.
+//   - fecha_inicio + fecha_fin: rango exacto (lo usa la impresión, para
+//     traer el mismo tramo de días de varios productores).
+//   - fecha_inicio + dia_fin: lo que arma la pantalla al elegir fechas.
 router.get(
   '/hoja',
   [
@@ -27,6 +32,7 @@ router.get(
     query('dia_inicio').optional().isInt({ min: 0, max: 6 }).withMessage('Día de inicio inválido'),
     query('dia_fin').optional().isInt({ min: 0, max: 6 }).withMessage('Día de cierre inválido'),
     query('fecha_inicio').optional().isISO8601().withMessage('Fecha de inicio inválida'),
+    query('fecha_fin').optional().isISO8601().withMessage('Fecha de cierre inválida'),
     query('semana_id').optional().isInt(),
   ],
   validar,
@@ -37,7 +43,7 @@ router.post(
   '/hoja',
   [
     body('productor_id').isInt().withMessage('Seleccione un productor'),
-    // O bien semana_id (reabrir una guardada), o bien fecha_inicio + dia_fin
+    // O bien semana_id (editar una guardada), o bien fecha_inicio + dia_fin
     // (crear/actualizar). El controlador valida la combinación exacta.
     body('semana_id').optional({ nullable: true }).isInt().withMessage('Semana inválida'),
     body('fecha_inicio').optional({ nullable: true }).isISO8601().withMessage('Fecha de inicio inválida'),
@@ -79,6 +85,24 @@ router.get(
 );
 
 router.patch('/semanas/:id/estado', [param('id').isInt()], validar, cambiarEstadoSemana);
+
+// '/semanas/vacias' va ANTES de '/semanas/:id': si no, Express intenta
+// leer "vacias" como un id.
+router.delete(
+  '/semanas/vacias',
+  permitirRoles('admin', 'contabilidad'),
+  [query('productor_id').optional().isInt()],
+  validar,
+  limpiarSemanasVacias
+);
+
+router.delete(
+  '/semanas/:id',
+  permitirRoles('admin', 'contabilidad'),
+  [param('id').isInt(), query('forzar').optional().isIn(['true', 'false'])],
+  validar,
+  eliminarSemana
+);
 
 router.get('/', listar);
 router.delete('/:id', permitirRoles('admin', 'contabilidad'), [param('id').isInt()], validar, eliminar);
