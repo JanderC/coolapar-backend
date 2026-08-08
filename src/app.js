@@ -9,6 +9,7 @@ const rutasRoutes = require('./modules/rutas/rutas');
 const productoresRoutes = require('./modules/productores/productores');
 const registroLecheRoutes = require('./modules/registroLeche/registroLeche');
 const ruterosRoutes = require('./modules/ruteros/ruteros');
+const insumosRoutes = require('./modules/insumos/insumos');
 
 const app = express();
 
@@ -37,6 +38,7 @@ app.use('/api/rutas', rutasRoutes);
 app.use('/api/productores', productoresRoutes);
 app.use('/api/registros-leche', registroLecheRoutes);
 app.use('/api/ruteros', ruterosRoutes);
+app.use('/api/insumos', insumosRoutes);
 
 // Manejo de rutas no encontradas y errores
 app.use(notFound);
