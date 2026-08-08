@@ -1,0 +1,224 @@
+const express = require('express');
+const { body, param, query } = require('express-validator');
+const { Op } = require('sequelize');
+
+const { Insumo, MovimientoInsumo } = require('../../models');
+const asyncHandler = require('../../utils/asyncHandler');
+const { proteger, permitirRoles } = require('../../middlewares/auth.middleware');
+const validar = require('../../middlewares/validate.middleware');
+const insumosService = require('../../services/insumos.service');
+
+const router = express.Router();
+
+const MONEDAS = ['BS', 'USD', 'COP'];
+const TIPOS_MOVIMIENTO = ['entrada', 'salida'];
+
+const vacio = (v) => v === undefined || v === null || v === '';
+
+const normalizarCampos = (body = {}) => {
+  const datos = {};
+  if (body.nombre !== undefined) datos.nombre = String(body.nombre).trim();
+  if (body.unidad_medida !== undefined) datos.unidad_medida = String(body.unidad_medida).trim();
+  if (body.precio_unitario_referencia !== undefined) {
+    datos.precio_unitario_referencia = vacio(body.precio_unitario_referencia) ? null : Number(body.precio_unitario_referencia);
+  }
+  if (body.moneda_referencia !== undefined) {
+    datos.moneda_referencia = vacio(body.moneda_referencia) ? null : String(body.moneda_referencia).toUpperCase();
+  }
+  if (body.stock_minimo !== undefined) {
+    datos.stock_minimo = vacio(body.stock_minimo) ? null : Number(body.stock_minimo);
+  }
+  if (body.proveedor !== undefined) datos.proveedor = vacio(body.proveedor) ? null : String(body.proveedor).trim();
+  if (body.activo !== undefined) datos.activo = body.activo === true || body.activo === 'true';
+  // stock_actual NUNCA se acepta aquí: solo lo mueve insumos.service.js a través de movimientos.
+  return datos;
+};
+
+const validarDatos = (datos, { esCreacion }) => {
+  if (esCreacion && !datos.nombre) return 'El nombre del insumo es obligatorio.';
+  if (datos.nombre !== undefined && !datos.nombre) return 'El nombre del insumo es obligatorio.';
+  if (esCreacion && !datos.unidad_medida) return 'La unidad de medida es obligatoria.';
+  if (datos.unidad_medida !== undefined && !datos.unidad_medida) return 'La unidad de medida es obligatoria.';
+
+  if (datos.moneda_referencia && !MONEDAS.includes(datos.moneda_referencia)) {
+    return `Moneda inválida. Use una de: ${MONEDAS.join(', ')}.`;
+  }
+  if (datos.precio_unitario_referencia !== undefined && datos.precio_unitario_referencia !== null) {
+    if (Number.isNaN(datos.precio_unitario_referencia) || datos.precio_unitario_referencia < 0) {
+      return 'El precio de referencia debe ser un número mayor o igual a 0.';
+    }
+  }
+  if (datos.stock_minimo !== undefined && datos.stock_minimo !== null) {
+    if (Number.isNaN(datos.stock_minimo) || datos.stock_minimo < 0) {
+      return 'El stock mínimo debe ser un número mayor o igual a 0.';
+    }
+  }
+  return null;
+};
+
+// ---------- Catálogo ----------
+const listar = asyncHandler(async (req, res) => {
+  const { activo, buscar, bajo_stock } = req.query;
+  const where = {};
+  if (activo !== undefined) where.activo = activo === 'true';
+  if (!vacio(buscar)) where.nombre = { [Op.iLike]: `%${String(buscar).trim()}%` };
+
+  let insumos = await Insumo.findAll({ where, order: [['nombre', 'ASC']] });
+  if (bajo_stock === 'true') insumos = insumos.filter((i) => insumosService.alertaStockMinimo(i));
+
+  res.json({ success: true, data: insumos });
+});
+
+const alertasStock = asyncHandler(async (req, res) => {
+  const insumos = await Insumo.findAll({ where: { activo: true }, order: [['nombre', 'ASC']] });
+  const enAlerta = insumos.filter((i) => insumosService.alertaStockMinimo(i));
+  res.json({ success: true, data: enAlerta });
+});
+
+const obtener = asyncHandler(async (req, res) => {
+  const insumo = await Insumo.findByPk(req.params.id);
+  if (!insumo) return res.status(404).json({ success: false, message: 'Insumo no encontrado.' });
+  res.json({ success: true, data: insumo });
+});
+
+const crear = asyncHandler(async (req, res) => {
+  const datos = normalizarCampos(req.body);
+
+  const error = validarDatos(datos, { esCreacion: true });
+  if (error) return res.status(400).json({ success: false, message: error });
+
+  const insumo = await Insumo.create({ ...datos, stock_actual: 0 });
+  res.status(201).json({ success: true, data: insumo });
+});
+
+const actualizar = asyncHandler(async (req, res) => {
+  const insumo = await Insumo.findByPk(req.params.id);
+  if (!insumo) return res.status(404).json({ success: false, message: 'Insumo no encontrado.' });
+
+  const datos = normalizarCampos(req.body);
+  const error = validarDatos(datos, { esCreacion: false });
+  if (error) return res.status(400).json({ success: false, message: error });
+
+  await insumo.update(datos);
+  res.json({ success: true, data: insumo });
+});
+
+const eliminar = asyncHandler(async (req, res) => {
+  const insumo = await Insumo.findByPk(req.params.id);
+  if (!insumo) return res.status(404).json({ success: false, message: 'Insumo no encontrado.' });
+
+  await insumo.update({ activo: false });
+  res.json({ success: true, message: 'Insumo desactivado.' });
+});
+
+// ---------- Kardex ----------
+const listarMovimientos = asyncHandler(async (req, res) => {
+  const insumo = await Insumo.findByPk(req.params.id);
+  if (!insumo) return res.status(404).json({ success: false, message: 'Insumo no encontrado.' });
+
+  const where = { insumo_id: insumo.id };
+  if (req.query.tipo && TIPOS_MOVIMIENTO.includes(req.query.tipo)) where.tipo = req.query.tipo;
+
+  const movimientos = await MovimientoInsumo.findAll({
+    where,
+    order: [['fecha', 'DESC'], ['id', 'DESC']],
+  });
+  res.json({ success: true, data: movimientos });
+});
+
+const crearMovimiento = asyncHandler(async (req, res) => {
+  try {
+    const { movimiento, insumo, alertaStockMinimo } = await insumosService.registrarMovimiento(req.params.id, req.body);
+    res.status(201).json({
+      success: true,
+      data: { movimiento, stock_actual: insumo.stock_actual, alerta_stock_minimo: alertaStockMinimo },
+    });
+  } catch (err) {
+    if (err.esErrorDeNegocio) return res.status(400).json({ success: false, message: err.message });
+    throw err;
+  }
+});
+
+const anularMovimiento = asyncHandler(async (req, res) => {
+  try {
+    const { insumo } = await insumosService.anularMovimiento(req.params.movimientoId);
+    res.json({ success: true, message: 'Movimiento anulado.', data: { stock_actual: insumo.stock_actual } });
+  } catch (err) {
+    if (err.esErrorDeNegocio) return res.status(400).json({ success: false, message: err.message });
+    throw err;
+  }
+});
+
+// ---------- Reglas de validación ----------
+const reglasInsumo = (esCreacion) => [
+  esCreacion
+    ? body('nombre').trim().notEmpty().withMessage('El nombre es obligatorio')
+    : body('nombre').optional().trim().notEmpty().withMessage('El nombre no puede quedar vacío'),
+  esCreacion
+    ? body('unidad_medida').trim().notEmpty().withMessage('La unidad de medida es obligatoria')
+    : body('unidad_medida').optional().trim().notEmpty().withMessage('La unidad de medida no puede quedar vacía'),
+  body('moneda_referencia')
+    .optional({ nullable: true })
+    .customSanitizer((v) => (v ? String(v).toUpperCase() : v))
+    .isIn(MONEDAS)
+    .withMessage(`Moneda inválida. Use: ${MONEDAS.join(', ')}`),
+  body('precio_unitario_referencia')
+    .optional({ nullable: true })
+    .customSanitizer((v) => (v === '' ? null : v))
+    .custom((v) => v === null || (!Number.isNaN(Number(v)) && Number(v) >= 0))
+    .withMessage('El precio de referencia debe ser un número mayor o igual a 0'),
+  body('stock_minimo')
+    .optional({ nullable: true })
+    .customSanitizer((v) => (v === '' ? null : v))
+    .custom((v) => v === null || (!Number.isNaN(Number(v)) && Number(v) >= 0))
+    .withMessage('El stock mínimo debe ser un número mayor o igual a 0'),
+  body('proveedor').optional({ nullable: true }).isLength({ max: 150 }).withMessage('Nombre de proveedor demasiado largo'),
+];
+
+const reglasMovimiento = [
+  body('tipo').isIn(TIPOS_MOVIMIENTO).withMessage(`Tipo inválido. Use: ${TIPOS_MOVIMIENTO.join(', ')}`),
+  body('cantidad')
+    .custom((v) => !Number.isNaN(Number(v)) && Number(v) > 0)
+    .withMessage('La cantidad debe ser un número mayor a 0'),
+  body('precio_unitario')
+    .optional({ nullable: true })
+    .customSanitizer((v) => (v === '' ? null : v))
+    .custom((v) => v === null || (!Number.isNaN(Number(v)) && Number(v) >= 0))
+    .withMessage('El precio unitario debe ser un número mayor o igual a 0'),
+  body('precio_unitario').custom((v, { req }) => {
+    if (req.body.tipo === 'entrada' && vacio(v)) throw new Error('Las entradas necesitan un precio unitario.');
+    return true;
+  }),
+  body('moneda')
+    .optional({ nullable: true })
+    .customSanitizer((v) => (v ? String(v).toUpperCase() : v))
+    .isIn(MONEDAS)
+    .withMessage(`Moneda inválida. Use: ${MONEDAS.join(', ')}`),
+  body('moneda').custom((v, { req }) => {
+    if (req.body.tipo === 'entrada' && vacio(v)) throw new Error('Las entradas necesitan la moneda en la que se pagó.');
+    return true;
+  }),
+  body('fecha').optional({ nullable: true }).isISO8601().withMessage('Fecha inválida'),
+  body('descripcion').optional({ nullable: true }).isLength({ max: 255 }).withMessage('Descripción demasiado larga'),
+];
+
+router.use(proteger);
+
+router.get('/', [query('activo').optional().isIn(['true', 'false'])], validar, listar);
+router.get('/alertas-stock', alertasStock);
+router.get('/:id', [param('id').isInt().withMessage('Id inválido')], validar, obtener);
+router.post('/', reglasInsumo(true), validar, crear);
+router.put('/:id', [param('id').isInt().withMessage('Id inválido'), ...reglasInsumo(false)], validar, actualizar);
+router.delete('/:id', permitirRoles('admin'), [param('id').isInt()], validar, eliminar);
+
+router.get('/:id/movimientos', [param('id').isInt().withMessage('Id inválido')], validar, listarMovimientos);
+router.post('/:id/movimientos', [param('id').isInt().withMessage('Id inválido'), ...reglasMovimiento], validar, crearMovimiento);
+router.delete(
+  '/movimientos/:movimientoId',
+  permitirRoles('admin', 'contabilidad'),
+  [param('movimientoId').isInt()],
+  validar,
+  anularMovimiento
+);
+
+module.exports = router;
