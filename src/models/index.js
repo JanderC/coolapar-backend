@@ -11,6 +11,7 @@ const RegistroLecheRutero = require('./registroLecheRutero.model')(sequelize, Da
 const PagoRutero = require('./pagoRutero.model')(sequelize, DataTypes);
 const Insumo = require('./insumo.model')(sequelize, DataTypes);
 const MovimientoInsumo = require('./movimientoInsumo.model')(sequelize, DataTypes);
+const LoteProduccion = require('./loteProduccion.model')(sequelize, DataTypes);
 
 const db = {
   sequelize,
@@ -25,6 +26,7 @@ const db = {
   PagoRutero,
   Insumo,
   MovimientoInsumo,
+  LoteProduccion,
 };
 
 // Relaciones que ya vienen definidas dentro de cada model
