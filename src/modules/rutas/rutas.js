@@ -5,6 +5,18 @@ const { proteger, permitirRoles } = require('../../middlewares/auth.middleware')
 
 const router = express.Router();
 
+// La asociacion Ruta -> Productor esta declarada en productor.model.js como:
+//   models.Ruta.hasMany(Productor, { foreignKey: 'ruta_id', as: 'Productores' })
+// Al tener alias, TODO include debe declararlo con 'as'.
+const incluirProductores = (attributes) => [
+  {
+    model: Productor,
+    as: 'Productores',
+    required: false,
+    ...(attributes ? { attributes } : {}),
+  },
+];
+
 // @desc  Listar rutas (por defecto solo activas), con la cantidad de productores de cada una
 // @route GET /api/rutas?activo=true
 const listar = asyncHandler(async (req, res) => {
@@ -14,15 +26,16 @@ const listar = asyncHandler(async (req, res) => {
 
   const rutas = await Ruta.findAll({
     where,
-    include: [{ model: Productor, attributes: ['id', 'nombre'] }],
+    include: incluirProductores(['id', 'nombre']),
     order: [['nombre', 'ASC']],
   });
 
   res.json({ success: true, data: rutas });
 });
 
+
 const obtener = asyncHandler(async (req, res) => {
-  const ruta = await Ruta.findByPk(req.params.id, { include: [{ model: Productor }] });
+  const ruta = await Ruta.findByPk(req.params.id, { include: incluirProductores() });
   if (!ruta) return res.status(404).json({ success: false, message: 'Ruta no encontrada.' });
   res.json({ success: true, data: ruta });
 });
