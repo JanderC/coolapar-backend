@@ -55,6 +55,11 @@ const resolverKilos = (body) => {
 
 // Solo toca en "datos" los campos que de verdad llegaron en el body, para
 // no pisar con null algo que el usuario no quiso tocar en un PUT parcial.
+//
+// OJO: porcentaje_litro_kilo NO se toca nunca aqui. En la base de datos es
+// una columna generada (GENERATED ALWAYS AS ... STORED) y Postgres rechaza
+// cualquier INSERT/UPDATE que le mande un valor, con el error:
+//   "cannot insert a non-DEFAULT value into column porcentaje_litro_kilo"
 const normalizarCampos = (body = {}) => {
   const datos = {};
   if (body.fecha !== undefined) datos.fecha = body.fecha;
@@ -67,6 +72,10 @@ const normalizarCampos = (body = {}) => {
 
   const huboKilos = body.kilos_obtenidos !== undefined || (Array.isArray(body.detalle_pesos) && body.detalle_pesos.length > 0);
   if (huboKilos) Object.assign(datos, resolverKilos(body));
+
+  // Cinturon de seguridad: si algun dia alguien manda el porcentaje en el
+  // body, lo descartamos antes de que llegue a la consulta.
+  delete datos.porcentaje_litro_kilo;
 
   return datos;
 };
@@ -149,9 +158,13 @@ const crear = asyncHandler(async (req, res) => {
   const error = validarDatos(datos, { esCreacion: true });
   if (error) return res.status(400).json({ success: false, message: error });
 
-  datos.porcentaje_litro_kilo = calcularPorcentajeLitroKilo(datos.litros_utilizados, datos.kilos_obtenidos);
+  // fields limita el INSERT a exactamente las columnas que preparamos, asi
+  // Sequelize nunca incluye porcentaje_litro_kilo (columna generada).
+  const lote = await LoteProduccion.create(datos, { fields: Object.keys(datos) });
 
-  const lote = await LoteProduccion.create(datos);
+  // reload trae el porcentaje ya calculado por la base de datos.
+  await lote.reload();
+
   res.status(201).json({ success: true, data: lote });
 });
 
@@ -163,13 +176,11 @@ const actualizar = asyncHandler(async (req, res) => {
   const error = validarDatos(datos, { esCreacion: false });
   if (error) return res.status(400).json({ success: false, message: error });
 
-  // El % se recalcula siempre que cambie litros o kilos; si no cambio
-  // ninguno, se recalcula igual con los valores que ya tenia (no pasa nada).
-  const litros = datos.litros_utilizados ?? lote.litros_utilizados;
-  const kilos = datos.kilos_obtenidos ?? lote.kilos_obtenidos;
-  datos.porcentaje_litro_kilo = calcularPorcentajeLitroKilo(litros, kilos);
+  // No recalculamos el porcentaje: al cambiar litros o kilos, Postgres
+  // regenera la columna automaticamente.
+  await lote.update(datos, { fields: Object.keys(datos) });
+  await lote.reload();
 
-  await lote.update(datos);
   res.json({ success: true, data: lote });
 });
 
@@ -177,7 +188,7 @@ const eliminar = asyncHandler(async (req, res) => {
   const lote = await LoteProduccion.findByPk(req.params.id);
   if (!lote) return res.status(404).json({ success: false, message: 'Lote de producción no encontrado.' });
 
-  await lote.update({ activo: false });
+  await lote.update({ activo: false }, { fields: ['activo'] });
   res.json({ success: true, message: 'Lote de producción desactivado.' });
 });
 

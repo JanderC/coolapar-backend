@@ -1,3 +1,23 @@
+// Nombre de la columna que Postgres calcula sola (GENERATED ALWAYS AS ... STORED).
+// Cualquier intento de escribirla revienta con:
+//   "cannot insert a non-DEFAULT value into column porcentaje_litro_kilo"
+const COLUMNA_GENERADA = 'porcentaje_litro_kilo';
+
+// Quita la columna generada tanto de los valores a guardar como de la lista
+// de campos que Sequelize va a incluir en el INSERT/UPDATE. Con esto da igual
+// si algun controlador la asigna por error: nunca llega a la consulta.
+const quitarColumnaGenerada = (instancia, opciones) => {
+  if (instancia && instancia.dataValues) {
+    delete instancia.dataValues[COLUMNA_GENERADA];
+  }
+  if (instancia && typeof instancia.changed === 'function') {
+    instancia.changed(COLUMNA_GENERADA, false);
+  }
+  if (opciones && Array.isArray(opciones.fields)) {
+    opciones.fields = opciones.fields.filter((campo) => campo !== COLUMNA_GENERADA);
+  }
+};
+
 module.exports = (sequelize, DataTypes) => {
   const LoteProduccion = sequelize.define(
     'LoteProduccion',
@@ -37,6 +57,18 @@ module.exports = (sequelize, DataTypes) => {
 
       cantidad_unidades: { type: DataTypes.INTEGER, allowNull: true },
 
+      // SOLO LECTURA. En Postgres es GENERATED ALWAYS AS ... STORED:
+      //   CASE WHEN kilos_obtenidos > 0
+      //        THEN litros_utilizados / kilos_obtenidos
+      //        ELSE 0 END
+      //
+      // allowNull: true para que Sequelize no exija el valor, y SIN
+      // defaultValue (un default haria que Sequelize la incluya en el INSERT).
+      // En la base de datos la columna sigue siendo NOT NULL y siempre trae
+      // valor, porque la calcula Postgres.
+      //
+      // calculo.service.js -> calcularPorcentajeLitroKilo() replica la misma
+      // formula, pero solo para previsualizar o para agregados. No se guarda.
       porcentaje_litro_kilo: { type: DataTypes.DECIMAL(8, 4), allowNull: true },
 
       notas: { type: DataTypes.STRING(255), allowNull: true },
@@ -48,9 +80,36 @@ module.exports = (sequelize, DataTypes) => {
       timestamps: true,
       createdAt: 'created_at',
       updatedAt: 'updated_at',
+
+      hooks: {
+        beforeCreate: quitarColumnaGenerada,
+        beforeUpdate: quitarColumnaGenerada,
+        beforeSave: quitarColumnaGenerada,
+        beforeBulkCreate: (instancias, opciones) => {
+          instancias.forEach((instancia) => quitarColumnaGenerada(instancia, null));
+          if (opciones && Array.isArray(opciones.fields)) {
+            opciones.fields = opciones.fields.filter((campo) => campo !== COLUMNA_GENERADA);
+          }
+        },
+        // Para Model.update({...}, { where }), que no pasa por beforeUpdate.
+        beforeBulkUpdate: (opciones) => {
+          if (opciones && opciones.attributes) delete opciones.attributes[COLUMNA_GENERADA];
+          if (opciones && Array.isArray(opciones.fields)) {
+            opciones.fields = opciones.fields.filter((campo) => campo !== COLUMNA_GENERADA);
+          }
+        },
+      },
     }
   );
 
   return LoteProduccion;
 };
 
+/*
+  AVISO — no usar sequelize.sync({ alter: true }) con este modelo.
+
+  Con "alter", Sequelize compara el modelo contra la tabla real y puede
+  intentar reescribir porcentaje_litro_kilo como una columna normal,
+  destruyendo la expresion GENERATED. Los cambios de esquema de esta tabla
+  deben hacerse con SQL/migraciones.
+*/
