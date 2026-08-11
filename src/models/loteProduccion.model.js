@@ -37,10 +37,7 @@ module.exports = (sequelize, DataTypes) => {
 
       cantidad_unidades: { type: DataTypes.INTEGER, allowNull: true },
 
-      // litros_utilizados / kilos_obtenidos. SIEMPRE se calcula en el
-      // controlador (con calculo.service.js) — nunca se acepta del body,
-      // para que no pueda quedar desincronizado del dato real.
-      porcentaje_litro_kilo: { type: DataTypes.DECIMAL(8, 4), allowNull: false },
+      porcentaje_litro_kilo: { type: DataTypes.DECIMAL(8, 4), allowNull: true },
 
       notas: { type: DataTypes.STRING(255), allowNull: true },
 
@@ -56,3 +53,4 @@ module.exports = (sequelize, DataTypes) => {
 
   return LoteProduccion;
 };
+
