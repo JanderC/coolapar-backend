@@ -855,6 +855,228 @@ const eliminarSemana = asyncHandler(async (req, res) => {
 });
 
 // ============================================================
+//  RESUMEN DE LA SEMANA (todos los productores de un rango)
+//
+//  Solo lectura: no crea ni modifica semanas_pago.
+//
+//  A diferencia de /hoja (que va de a un productor), aqui se parte del
+//  rango de fechas y se agrupan los registros que caen dentro. Un
+//  productor aparece si tiene al menos un litro cargado en ese rango,
+//  sin importar como tenga configurada su propia semana.
+// ============================================================
+
+// Tope de seguridad: sin esto, un rango de dos años traeria decenas de
+// miles de filas a memoria para agruparlas en JS.
+const MAX_DIAS_RESUMEN = 92;
+
+// @desc  Productores con litros cargados en un rango, con sus totales.
+// @route GET /api/registros-leche/resumen-semana?fecha_inicio=&fecha_fin=
+const resumenSemana = asyncHandler(async (req, res) => {
+  const desde = aTexto(req.query.fecha_inicio);
+  const hasta = aTexto(req.query.fecha_fin);
+
+  if (!esFechaValida(desde) || !esFechaValida(hasta)) {
+    return res.status(400).json({ success: false, message: 'Indique la fecha de inicio y la de cierre.' });
+  }
+  if (desde > hasta) {
+    return res.status(400).json({ success: false, message: 'La fecha de inicio debe ser anterior a la de cierre.' });
+  }
+
+  const fechas = rangoFechas(desde, hasta);
+  if (fechas.length > MAX_DIAS_RESUMEN) {
+    return res.status(400).json({
+      success: false,
+      message: `El rango no puede pasar de ${MAX_DIAS_RESUMEN} días. Consulte por semanas.`,
+    });
+  }
+
+  const registros = await RegistroLecheProductor.findAll({
+    where: { fecha: { [Op.between]: [desde, hasta] } },
+    include: [incluirProductor],
+    order: [
+      ['productor_id', 'ASC'],
+      ['fecha', 'ASC'],
+    ],
+  });
+
+  // ---- Agrupar por productor ----
+  const porProductor = new Map();
+
+  registros.forEach((r) => {
+    const litros = aNumero(r.litros, 0);
+    const acidos = aNumero(r.litros_acidos, 0);
+    const bajoGrasa = aNumero(r.litros_bajo_grasa, 0);
+
+    // Un día sin un solo litro no cuenta como "cargado".
+    if (litros <= 0 && acidos <= 0 && bajoGrasa <= 0) return;
+
+    const id = Number(r.productor_id);
+    if (!porProductor.has(id)) {
+      const p = r.Productor;
+      porProductor.set(id, {
+        productor_id: id,
+        nombre: p?.nombre || `Productor ${id}`,
+        color_identificativo: p?.color_identificativo || null,
+        moneda: normalizarMoneda(p?.moneda, 'BS'),
+        monedas: new Set(),
+        semanas: new Set(),
+        dias_con_leche: 0,
+        primera_fecha: aTexto(r.fecha),
+        ultima_fecha: aTexto(r.fecha),
+        total_litros: 0,
+        total_litros_acidos: 0,
+        total_litros_bajo_grasa: 0,
+        total_pagar_normal: 0,
+        total_pagar_acida: 0,
+        total_pagar_bajo_grasa: 0,
+        total_pagar: 0,
+        precio_litro: 0,
+        precio_litro_acida: 0,
+        precio_litro_bajo_grasa: 0,
+      });
+    }
+
+    const fila = porProductor.get(id);
+    const moneda = normalizarMoneda(r.moneda, fila.moneda);
+
+    fila.dias_con_leche += 1;
+    fila.ultima_fecha = aTexto(r.fecha);
+    fila.monedas.add(moneda);
+    if (r.semana_id) fila.semanas.add(Number(r.semana_id));
+
+    fila.total_litros += litros;
+    fila.total_litros_acidos += acidos;
+    fila.total_litros_bajo_grasa += bajoGrasa;
+    fila.total_pagar_normal += litros * aNumero(r.precio_litro, 0);
+    fila.total_pagar_acida += acidos * aNumero(r.precio_litro_acida, 0);
+    fila.total_pagar_bajo_grasa += bajoGrasa * aNumero(r.precio_litro_bajo_grasa, 0);
+    fila.total_pagar += aNumero(r.subtotal, 0);
+
+    // Los registros vienen ordenados por fecha: el último día cargado
+    // manda, igual que en la hoja individual.
+    fila.moneda = moneda;
+    fila.precio_litro = aNumero(r.precio_litro, 0);
+    fila.precio_litro_acida = aNumero(r.precio_litro_acida, 0);
+    fila.precio_litro_bajo_grasa = aNumero(r.precio_litro_bajo_grasa, 0);
+  });
+
+  // ---- Estado de pago (una sola consulta para todas las semanas) ----
+  const idsSemanas = [...new Set([...porProductor.values()].flatMap((f) => [...f.semanas]))];
+
+  const pagos =
+    PagoProductor && idsSemanas.length
+      ? await PagoProductor.findAll({ where: { semana_id: idsSemanas } })
+      : [];
+
+  const semanas = idsSemanas.length
+    ? await SemanaPago.findAll({ where: { id: idsSemanas } })
+    : [];
+
+  const estadoSemana = new Map(semanas.map((s) => [Number(s.id), s.estado]));
+
+  // ---- Armar la respuesta ----
+  const productores = [...porProductor.values()]
+    .map((f) => {
+      const listaSemanas = [...f.semanas];
+      // Solo tiene sentido hablar de "la" semana si todos los días del
+      // rango cayeron dentro de la misma semana guardada.
+      const semanaId = listaSemanas.length === 1 ? listaSemanas[0] : null;
+      const pago = semanaId ? pagos.find((p) => Number(p.productor_id) === f.productor_id && Number(p.semana_id) === semanaId) : null;
+
+      return {
+        productor_id: f.productor_id,
+        nombre: f.nombre,
+        color_identificativo: f.color_identificativo,
+        moneda: f.moneda,
+        // Aviso para la pantalla: este productor cambió de moneda a mitad
+        // del rango, así que su total no se puede leer de corrido.
+        monedas_mezcladas: f.monedas.size > 1,
+        semana_id: semanaId,
+        semanas_ids: listaSemanas,
+        estado_semana: semanaId ? estadoSemana.get(semanaId) || null : null,
+        estado_pago: pago?.estado_pago || null,
+        fecha_pago: pago?.fecha_pago || null,
+        guardado: listaSemanas.length > 0,
+        dias_con_leche: f.dias_con_leche,
+        primera_fecha: f.primera_fecha,
+        ultima_fecha: f.ultima_fecha,
+        precio_litro: redondear(f.precio_litro),
+        precio_litro_acida: redondear(f.precio_litro_acida),
+        precio_litro_bajo_grasa: redondear(f.precio_litro_bajo_grasa),
+        total_litros: redondear(f.total_litros),
+        total_litros_acidos: redondear(f.total_litros_acidos),
+        total_litros_bajo_grasa: redondear(f.total_litros_bajo_grasa),
+        total_pagar_normal: redondear(f.total_pagar_normal),
+        total_pagar_acida: redondear(f.total_pagar_acida),
+        total_pagar_bajo_grasa: redondear(f.total_pagar_bajo_grasa),
+        total_pagar: redondear(f.total_pagar),
+      };
+    })
+    .sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+
+  // ---- Totales por moneda ----
+  // El dinero NO se suma entre monedas: BS va por su lado y USD por el
+  // suyo. Los litros sí se pueden sumar todos juntos.
+  const porMoneda = new Map();
+  productores.forEach((p) => {
+    if (!porMoneda.has(p.moneda)) {
+      porMoneda.set(p.moneda, {
+        moneda: p.moneda,
+        productores: 0,
+        total_litros: 0,
+        total_litros_acidos: 0,
+        total_litros_bajo_grasa: 0,
+        total_pagar_normal: 0,
+        total_pagar_acida: 0,
+        total_pagar_bajo_grasa: 0,
+        total_pagar: 0,
+      });
+    }
+    const t = porMoneda.get(p.moneda);
+    t.productores += 1;
+    t.total_litros += p.total_litros;
+    t.total_litros_acidos += p.total_litros_acidos;
+    t.total_litros_bajo_grasa += p.total_litros_bajo_grasa;
+    t.total_pagar_normal += p.total_pagar_normal;
+    t.total_pagar_acida += p.total_pagar_acida;
+    t.total_pagar_bajo_grasa += p.total_pagar_bajo_grasa;
+    t.total_pagar += p.total_pagar;
+  });
+
+  const totalesPorMoneda = [...porMoneda.values()]
+    .map((t) => ({
+      ...t,
+      total_litros: redondear(t.total_litros),
+      total_litros_acidos: redondear(t.total_litros_acidos),
+      total_litros_bajo_grasa: redondear(t.total_litros_bajo_grasa),
+      total_pagar_normal: redondear(t.total_pagar_normal),
+      total_pagar_acida: redondear(t.total_pagar_acida),
+      total_pagar_bajo_grasa: redondear(t.total_pagar_bajo_grasa),
+      total_pagar: redondear(t.total_pagar),
+    }))
+    .sort((a, b) => a.moneda.localeCompare(b.moneda));
+
+  res.json({
+    success: true,
+    data: {
+      rango: {
+        fecha_inicio: desde,
+        fecha_fin: hasta,
+        dias: fechas.length,
+      },
+      productores,
+      totales_por_moneda: totalesPorMoneda,
+      totales: {
+        productores: productores.length,
+        total_litros: redondear(productores.reduce((s, p) => s + p.total_litros, 0)),
+        total_litros_acidos: redondear(productores.reduce((s, p) => s + p.total_litros_acidos, 0)),
+        total_litros_bajo_grasa: redondear(productores.reduce((s, p) => s + p.total_litros_bajo_grasa, 0)),
+      },
+    },
+  });
+});
+
+// ============================================================
 //  REGISTROS SUELTOS (compatibilidad)
 // ============================================================
 
@@ -967,6 +1189,17 @@ router.delete(
   [param('id').isInt(), query('forzar').optional().isIn(['true', 'false'])],
   validar,
   eliminarSemana
+);
+
+// Resumen de la semana: todos los productores de un rango de fechas.
+router.get(
+  '/resumen-semana',
+  [
+    query('fecha_inicio').isISO8601().withMessage('Fecha de inicio inválida'),
+    query('fecha_fin').isISO8601().withMessage('Fecha de cierre inválida'),
+  ],
+  validar,
+  resumenSemana
 );
 
 router.get('/', listar);
