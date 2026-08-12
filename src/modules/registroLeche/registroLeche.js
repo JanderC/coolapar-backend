@@ -861,15 +861,18 @@ const eliminarSemana = asyncHandler(async (req, res) => {
 //
 //  A diferencia de /hoja (que va de a un productor), aqui se parte del
 //  rango de fechas y se agrupan los registros que caen dentro. Un
-//  productor aparece si tiene al menos un litro cargado en ese rango,
-//  sin importar como tenga configurada su propia semana.
+//  productor aparece si dejo al menos un litro en ese rango, sin importar
+//  como tenga configurada su propia semana.
+//
+//  Devuelve, por cada productor: el litraje de CADA dia del rango (para
+//  armar la tabla dia por dia), sus precios y su total a pagar.
 // ============================================================
 
-// Tope de seguridad: sin esto, un rango de dos años traeria decenas de
+// Tope de seguridad: sin esto, un rango de dos anios traeria decenas de
 // miles de filas a memoria para agruparlas en JS.
 const MAX_DIAS_RESUMEN = 92;
 
-// @desc  Productores con litros cargados en un rango, con sus totales.
+// @desc  Productores con litros cargados en un rango, dia por dia.
 // @route GET /api/registros-leche/resumen-semana?fecha_inicio=&fecha_fin=
 const resumenSemana = asyncHandler(async (req, res) => {
   const desde = aTexto(req.query.fecha_inicio);
@@ -886,7 +889,7 @@ const resumenSemana = asyncHandler(async (req, res) => {
   if (fechas.length > MAX_DIAS_RESUMEN) {
     return res.status(400).json({
       success: false,
-      message: `El rango no puede pasar de ${MAX_DIAS_RESUMEN} días. Consulte por semanas.`,
+      message: `El rango no puede pasar de ${MAX_DIAS_RESUMEN} dias. Consulte por semanas.`,
     });
   }
 
@@ -907,7 +910,7 @@ const resumenSemana = asyncHandler(async (req, res) => {
     const acidos = aNumero(r.litros_acidos, 0);
     const bajoGrasa = aNumero(r.litros_bajo_grasa, 0);
 
-    // Un día sin un solo litro no cuenta como "cargado".
+    // Un dia sin un solo litro no cuenta como "dejo leche".
     if (litros <= 0 && acidos <= 0 && bajoGrasa <= 0) return;
 
     const id = Number(r.productor_id);
@@ -920,6 +923,8 @@ const resumenSemana = asyncHandler(async (req, res) => {
         moneda: normalizarMoneda(p?.moneda, 'BS'),
         monedas: new Set(),
         semanas: new Set(),
+        // Litraje por fecha, para armar la fila dia por dia.
+        porFecha: new Map(),
         dias_con_leche: 0,
         primera_fecha: aTexto(r.fecha),
         ultima_fecha: aTexto(r.fecha),
@@ -938,11 +943,22 @@ const resumenSemana = asyncHandler(async (req, res) => {
 
     const fila = porProductor.get(id);
     const moneda = normalizarMoneda(r.moneda, fila.moneda);
+    const fecha = aTexto(r.fecha);
+    const subtotal = aNumero(r.subtotal, 0);
 
     fila.dias_con_leche += 1;
-    fila.ultima_fecha = aTexto(r.fecha);
+    fila.ultima_fecha = fecha;
     fila.monedas.add(moneda);
     if (r.semana_id) fila.semanas.add(Number(r.semana_id));
+
+    fila.porFecha.set(fecha, {
+      fecha,
+      dia: nombreDia(fecha),
+      litros: redondear(litros),
+      litros_acidos: redondear(acidos),
+      litros_bajo_grasa: redondear(bajoGrasa),
+      subtotal: redondear(subtotal),
+    });
 
     fila.total_litros += litros;
     fila.total_litros_acidos += acidos;
@@ -950,9 +966,9 @@ const resumenSemana = asyncHandler(async (req, res) => {
     fila.total_pagar_normal += litros * aNumero(r.precio_litro, 0);
     fila.total_pagar_acida += acidos * aNumero(r.precio_litro_acida, 0);
     fila.total_pagar_bajo_grasa += bajoGrasa * aNumero(r.precio_litro_bajo_grasa, 0);
-    fila.total_pagar += aNumero(r.subtotal, 0);
+    fila.total_pagar += subtotal;
 
-    // Los registros vienen ordenados por fecha: el último día cargado
+    // Los registros vienen ordenados por fecha: el ultimo dia cargado
     // manda, igual que en la hoja individual.
     fila.moneda = moneda;
     fila.precio_litro = aNumero(r.precio_litro, 0);
@@ -964,32 +980,46 @@ const resumenSemana = asyncHandler(async (req, res) => {
   const idsSemanas = [...new Set([...porProductor.values()].flatMap((f) => [...f.semanas]))];
 
   const pagos =
-    PagoProductor && idsSemanas.length
-      ? await PagoProductor.findAll({ where: { semana_id: idsSemanas } })
-      : [];
+    PagoProductor && idsSemanas.length ? await PagoProductor.findAll({ where: { semana_id: idsSemanas } }) : [];
 
-  const semanas = idsSemanas.length
-    ? await SemanaPago.findAll({ where: { id: idsSemanas } })
-    : [];
-
+  const semanas = idsSemanas.length ? await SemanaPago.findAll({ where: { id: idsSemanas } }) : [];
   const estadoSemana = new Map(semanas.map((s) => [Number(s.id), s.estado]));
+
+  // Columnas de la tabla: todos los dias del rango, con o sin leche.
+  const columnas = fechas.map((f) => ({ fecha: f, dia: nombreDia(f) }));
 
   // ---- Armar la respuesta ----
   const productores = [...porProductor.values()]
     .map((f) => {
       const listaSemanas = [...f.semanas];
-      // Solo tiene sentido hablar de "la" semana si todos los días del
+      // Solo tiene sentido hablar de "la" semana si todos los dias del
       // rango cayeron dentro de la misma semana guardada.
       const semanaId = listaSemanas.length === 1 ? listaSemanas[0] : null;
-      const pago = semanaId ? pagos.find((p) => Number(p.productor_id) === f.productor_id && Number(p.semana_id) === semanaId) : null;
+      const pago = semanaId
+        ? pagos.find((p) => Number(p.productor_id) === f.productor_id && Number(p.semana_id) === semanaId)
+        : null;
+
+      // Se rellenan los dias sin leche para que todas las filas tengan
+      // exactamente las mismas columnas y la tabla cuadre.
+      const dias = columnas.map(
+        (c) =>
+          f.porFecha.get(c.fecha) || {
+            fecha: c.fecha,
+            dia: c.dia,
+            litros: 0,
+            litros_acidos: 0,
+            litros_bajo_grasa: 0,
+            subtotal: 0,
+          }
+      );
 
       return {
         productor_id: f.productor_id,
         nombre: f.nombre,
         color_identificativo: f.color_identificativo,
         moneda: f.moneda,
-        // Aviso para la pantalla: este productor cambió de moneda a mitad
-        // del rango, así que su total no se puede leer de corrido.
+        // Aviso para la pantalla: este productor cambio de moneda a mitad
+        // del rango, asi que su total no se puede leer de corrido.
         monedas_mezcladas: f.monedas.size > 1,
         semana_id: semanaId,
         semanas_ids: listaSemanas,
@@ -997,6 +1027,7 @@ const resumenSemana = asyncHandler(async (req, res) => {
         estado_pago: pago?.estado_pago || null,
         fecha_pago: pago?.fecha_pago || null,
         guardado: listaSemanas.length > 0,
+        dias,
         dias_con_leche: f.dias_con_leche,
         primera_fecha: f.primera_fecha,
         ultima_fecha: f.ultima_fecha,
@@ -1016,7 +1047,7 @@ const resumenSemana = asyncHandler(async (req, res) => {
 
   // ---- Totales por moneda ----
   // El dinero NO se suma entre monedas: BS va por su lado y USD por el
-  // suyo. Los litros sí se pueden sumar todos juntos.
+  // suyo. Los litros si se pueden sumar todos juntos.
   const porMoneda = new Map();
   productores.forEach((p) => {
     if (!porMoneda.has(p.moneda)) {
@@ -1056,6 +1087,27 @@ const resumenSemana = asyncHandler(async (req, res) => {
     }))
     .sort((a, b) => a.moneda.localeCompare(b.moneda));
 
+  // Litros recibidos por dia, sumando a todos los productores.
+  const totalesPorDia = columnas.map((c) => {
+    let litros = 0;
+    let acidos = 0;
+    let bajoGrasa = 0;
+    productores.forEach((p) => {
+      const d = p.dias.find((x) => x.fecha === c.fecha);
+      if (!d) return;
+      litros += d.litros;
+      acidos += d.litros_acidos;
+      bajoGrasa += d.litros_bajo_grasa;
+    });
+    return {
+      fecha: c.fecha,
+      dia: c.dia,
+      total_litros: redondear(litros),
+      total_litros_acidos: redondear(acidos),
+      total_litros_bajo_grasa: redondear(bajoGrasa),
+    };
+  });
+
   res.json({
     success: true,
     data: {
@@ -1063,8 +1115,10 @@ const resumenSemana = asyncHandler(async (req, res) => {
         fecha_inicio: desde,
         fecha_fin: hasta,
         dias: fechas.length,
+        columnas,
       },
       productores,
+      totales_por_dia: totalesPorDia,
       totales_por_moneda: totalesPorMoneda,
       totales: {
         productores: productores.length,
