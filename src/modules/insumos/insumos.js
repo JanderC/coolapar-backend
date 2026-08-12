@@ -2,7 +2,8 @@ const express = require('express');
 const { body, param, query } = require('express-validator');
 const { Op } = require('sequelize');
 
-const { Insumo, MovimientoInsumo } = require('../../models');
+const db = require('../../models');
+const { Insumo, MovimientoInsumo, RegistroLecheProductor, LoteProduccion } = db;
 const asyncHandler = require('../../utils/asyncHandler');
 const { proteger, permitirRoles } = require('../../middlewares/auth.middleware');
 const validar = require('../../middlewares/validate.middleware');
@@ -15,10 +16,59 @@ const TIPOS_MOVIMIENTO = ['entrada', 'salida'];
 
 const vacio = (v) => v === undefined || v === null || v === '';
 
+// ---------- Unidades de medida ----------
+// Se cierran a una lista fija para que el inventario sea sumable y
+// entendible. Sin esto la gente escribe "Kg", "kilos", "KILOS" y el mismo
+// insumo termina con tres unidades distintas que no se pueden comparar.
+const UNIDADES = ['kg', 'g', 'L', 'ml', 'unidades', 'sacos', 'cajas', 'bolsas', 'rollos', 'pares', 'm', 'cm'];
+
+// Formas de escribir cada unidad que se aceptan y se corrigen solas.
+const SINONIMOS_UNIDAD = {
+  kg: 'kg', kgs: 'kg', kilo: 'kg', kilos: 'kg', kilogramo: 'kg', kilogramos: 'kg',
+  g: 'g', gr: 'g', grs: 'g', gramo: 'g', gramos: 'g',
+  l: 'L', lt: 'L', lts: 'L', litro: 'L', litros: 'L',
+  ml: 'ml', mililitro: 'ml', mililitros: 'ml',
+  u: 'unidades', und: 'unidades', unid: 'unidades', unidad: 'unidades', unidades: 'unidades', pieza: 'unidades', piezas: 'unidades',
+  saco: 'sacos', sacos: 'sacos',
+  caja: 'cajas', cajas: 'cajas',
+  bolsa: 'bolsas', bolsas: 'bolsas',
+  rollo: 'rollos', rollos: 'rollos',
+  par: 'pares', pares: 'pares',
+  m: 'm', metro: 'm', metros: 'm',
+  cm: 'cm', centimetro: 'cm', centimetros: 'cm',
+};
+
+/** Deja la unidad en su forma canonica; devuelve null si no la reconoce. */
+const normalizarUnidad = (valor) => {
+  const limpio = String(valor || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase()
+    .replace(/\.$/, '');
+  if (!limpio) return null;
+  return SINONIMOS_UNIDAD[limpio] || null;
+};
+
+// Unidad fija de la leche: siempre litros.
+const UNIDAD_LECHE = 'L';
+
+/** Suma una columna, devolviendo 0 en vez de null cuando no hay filas. */
+const sumar = async (modelo, columna, where) => {
+  const total = await modelo.sum(columna, { where });
+  return Number(total || 0);
+};
+
+const redondear2 = (n) => Number(Number(n || 0).toFixed(2));
+
 const normalizarCampos = (body = {}) => {
   const datos = {};
   if (body.nombre !== undefined) datos.nombre = String(body.nombre).trim();
-  if (body.unidad_medida !== undefined) datos.unidad_medida = String(body.unidad_medida).trim();
+  if (body.unidad_medida !== undefined) {
+    // Se guarda ya normalizada ("Kilos" -> "kg"). Si no se reconoce se deja
+    // el texto tal cual para que validarDatos lo rechace con un mensaje claro.
+    datos.unidad_medida = normalizarUnidad(body.unidad_medida) || String(body.unidad_medida).trim();
+  }
   if (body.precio_unitario_referencia !== undefined) {
     datos.precio_unitario_referencia = vacio(body.precio_unitario_referencia) ? null : Number(body.precio_unitario_referencia);
   }
@@ -39,6 +89,10 @@ const validarDatos = (datos, { esCreacion }) => {
   if (datos.nombre !== undefined && !datos.nombre) return 'El nombre del insumo es obligatorio.';
   if (esCreacion && !datos.unidad_medida) return 'La unidad de medida es obligatoria.';
   if (datos.unidad_medida !== undefined && !datos.unidad_medida) return 'La unidad de medida es obligatoria.';
+
+  if (datos.unidad_medida !== undefined && datos.unidad_medida && !UNIDADES.includes(datos.unidad_medida)) {
+    return `Unidad de medida no reconocida. Use una de: ${UNIDADES.join(', ')}.`;
+  }
 
   if (datos.moneda_referencia && !MONEDAS.includes(datos.moneda_referencia)) {
     return `Moneda inválida. Use una de: ${MONEDAS.join(', ')}.`;
@@ -67,6 +121,83 @@ const listar = asyncHandler(async (req, res) => {
   if (bajo_stock === 'true') insumos = insumos.filter((i) => insumosService.alertaStockMinimo(i));
 
   res.json({ success: true, data: insumos });
+});
+
+// ---------- Inventario completo ----------
+// Devuelve, en una sola llamada, todo lo que necesita la pantalla:
+//   - la leche que entro por el registro diario de los productores
+//   - el catalogo de productos con su stock
+//
+// La LECHE no se carga a mano en insumos ni se guarda en la tabla
+// `insumos`: se calcula al vuelo sumando registros_leche_productores. Asi
+// nunca queda descuadrada con lo que cargo el operador, y no hay que
+// acordarse de registrarla dos veces.
+const resumenInventario = asyncHandler(async (req, res) => {
+  const { fecha_inicio, fecha_fin } = req.query;
+  const hayRango = !vacio(fecha_inicio) && !vacio(fecha_fin);
+  const enRango = hayRango ? { fecha: { [Op.between]: [fecha_inicio, fecha_fin] } } : null;
+
+  // --- Leche recibida de los productores ---
+  const columnas = [
+    { clave: 'buenos', columna: 'litros', nombre: 'Leche — litros buenos' },
+    { clave: 'acidos', columna: 'litros_acidos', nombre: 'Leche — litros acidos' },
+    { clave: 'bajo_grasa', columna: 'litros_bajo_grasa', nombre: 'Leche — litros bajos en grasa' },
+  ];
+
+  const tipos = await Promise.all(
+    columnas.map(async (c) => ({
+      clave: c.clave,
+      nombre: c.nombre,
+      unidad_medida: UNIDAD_LECHE,
+      recibido_rango: hayRango ? redondear2(await sumar(RegistroLecheProductor, c.columna, enRango)) : null,
+      recibido_total: redondear2(await sumar(RegistroLecheProductor, c.columna, null)),
+    }))
+  );
+
+  // Ultimo dia con leche cargada: sirve para que la pantalla avise si el
+  // registro diario lleva rato sin moverse.
+  const ultimo = await RegistroLecheProductor.findOne({
+    order: [['fecha', 'DESC']],
+    attributes: ['fecha'],
+  });
+
+  // --- Leche que ya se uso en produccion ---
+  // OJO: los lotes de produccion guardan litros_utilizados sin separar si
+  // eran buenos, acidos o bajos en grasa. Por eso lo consumido solo se
+  // puede descontar del total, no de cada tipo por separado.
+  const usadaTotal = LoteProduccion
+    ? redondear2(await sumar(LoteProduccion, 'litros_utilizados', { activo: true }))
+    : 0;
+  const usadaRango = LoteProduccion && hayRango
+    ? redondear2(await sumar(LoteProduccion, 'litros_utilizados', { activo: true, ...enRango }))
+    : null;
+
+  const recibidoTotal = redondear2(tipos.reduce((s, t) => s + t.recibido_total, 0));
+  const recibidoRango = hayRango ? redondear2(tipos.reduce((s, t) => s + (t.recibido_rango || 0), 0)) : null;
+
+  // --- Catalogo de productos ---
+  const insumos = await Insumo.findAll({ order: [['nombre', 'ASC']] });
+  const enAlerta = insumos.filter((i) => i.activo && insumosService.alertaStockMinimo(i));
+
+  res.json({
+    success: true,
+    data: {
+      leche: {
+        unidad_medida: UNIDAD_LECHE,
+        rango: hayRango ? { fecha_inicio, fecha_fin } : null,
+        tipos,
+        recibido_rango: recibidoRango,
+        recibido_total: recibidoTotal,
+        usada_produccion_rango: usadaRango,
+        usada_produccion_total: usadaTotal,
+        disponible_total: redondear2(recibidoTotal - usadaTotal),
+        ultima_carga: ultimo ? ultimo.fecha : null,
+      },
+      insumos,
+      unidades: UNIDADES,
+      alertas: enAlerta.map((i) => ({ id: i.id, nombre: i.nombre, stock_actual: i.stock_actual, stock_minimo: i.stock_minimo, unidad_medida: i.unidad_medida })),
+    },
+  });
 });
 
 const alertasStock = asyncHandler(async (req, res) => {
@@ -206,6 +337,14 @@ router.use(proteger);
 
 router.get('/', [query('activo').optional().isIn(['true', 'false'])], validar, listar);
 router.get('/alertas-stock', alertasStock);
+// Inventario completo (leche + productos). Va antes de '/:id' para que
+// Express no lo lea como un id.
+router.get(
+  '/resumen',
+  [query('fecha_inicio').optional().isISO8601(), query('fecha_fin').optional().isISO8601()],
+  validar,
+  resumenInventario
+);
 router.get('/:id', [param('id').isInt().withMessage('Id inválido')], validar, obtener);
 router.post('/', reglasInsumo(true), validar, crear);
 router.put('/:id', [param('id').isInt().withMessage('Id inválido'), ...reglasInsumo(false)], validar, actualizar);
