@@ -9,6 +9,12 @@ module.exports = (sequelize, DataTypes) => {
 
       insumo_id: { type: DataTypes.INTEGER, allowNull: false },
 
+      // Lote de produccion que genero este movimiento, si vino de ahi:
+      //   salida  -> lo que el lote consumio
+      //   entrada -> devolucion porque el lote se corrigio o se anulo
+      // Queda en null en las compras y consumos cargados a mano.
+      lote_produccion_id: { type: DataTypes.INTEGER, allowNull: true },
+
       tipo: {
         type: DataTypes.STRING(10),
         allowNull: false,
@@ -56,8 +62,13 @@ module.exports = (sequelize, DataTypes) => {
   );
 
   MovimientoInsumo.associate = (models) => {
-    if (!models.Insumo) return;
-    MovimientoInsumo.belongsTo(models.Insumo, { foreignKey: 'insumo_id', as: 'Insumo' });
+    if (models.Insumo) {
+      MovimientoInsumo.belongsTo(models.Insumo, { foreignKey: 'insumo_id', as: 'Insumo' });
+    }
+    if (models.LoteProduccion) {
+      MovimientoInsumo.belongsTo(models.LoteProduccion, { foreignKey: 'lote_produccion_id', as: 'Lote' });
+      models.LoteProduccion.hasMany(MovimientoInsumo, { foreignKey: 'lote_produccion_id', as: 'MovimientosInsumo' });
+    }
   };
 
   MovimientoInsumo.TIPOS = TIPOS;

@@ -71,6 +71,27 @@ module.exports = (sequelize, DataTypes) => {
       // formula, pero solo para previsualizar o para agregados. No se guarda.
       porcentaje_litro_kilo: { type: DataTypes.DECIMAL(8, 4), allowNull: true },
 
+      // ---- Leche del lote ----
+      // La leche NO es un insumo del inventario: entra por el registro
+      // diario de los productores. Su precio se escribe a mano en cada
+      // lote, porque puede variar de una semana a otra.
+      precio_litro_leche: {
+        type: DataTypes.DECIMAL(10, 2),
+        allowNull: true,
+        validate: { min: { args: [0], msg: 'El precio de la leche no puede ser negativo.' } },
+      },
+      moneda_leche: { type: DataTypes.STRING(3), allowNull: true },
+
+      // ---- Formula del lote ----
+      // Foto de lo que se gasto: [{ insumo_id, nombre, unidad_medida,
+      // cantidad, precio_unitario_referencia, costo_estimado }]
+      //
+      // Se guarda congelada aunque los movimientos de inventario ya
+      // tengan el dato, para que el lote se lea de un vistazo y para que
+      // la formula siga entendiendose si mas adelante se archiva o se
+      // renombra un insumo. La escribe produccion.service.js.
+      insumos_usados: { type: DataTypes.JSONB, allowNull: true },
+
       notas: { type: DataTypes.STRING(255), allowNull: true },
 
       activo: { type: DataTypes.BOOLEAN, defaultValue: true },
@@ -104,12 +125,3 @@ module.exports = (sequelize, DataTypes) => {
 
   return LoteProduccion;
 };
-
-/*
-  AVISO — no usar sequelize.sync({ alter: true }) con este modelo.
-
-  Con "alter", Sequelize compara el modelo contra la tabla real y puede
-  intentar reescribir porcentaje_litro_kilo como una columna normal,
-  destruyendo la expresion GENERATED. Los cambios de esquema de esta tabla
-  deben hacerse con SQL/migraciones.
-*/

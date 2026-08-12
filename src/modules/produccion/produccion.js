@@ -2,7 +2,7 @@ const express = require('express');
 const { body, param, query } = require('express-validator');
 const { Op } = require('sequelize');
 
-const { LoteProduccion } = require('../../models');
+const { LoteProduccion, Insumo, MovimientoInsumo, sequelize } = require('../../models');
 const asyncHandler = require('../../utils/asyncHandler');
 const { proteger, permitirRoles } = require('../../middlewares/auth.middleware');
 const validar = require('../../middlewares/validate.middleware');
@@ -11,11 +11,27 @@ const validar = require('../../middlewares/validate.middleware');
 // importarla aunque UsoInsumo todavia no exista como modelo: esa funcion
 // en particular no toca Insumo ni UsoInsumo, solo hace litros/kilos.
 const { calcularPorcentajeLitroKilo } = require('../../services/calculo.service');
+const { ErrorDeNegocio } = require('../../services/insumos.service');
+const produccionService = require('../../services/produccion.service');
 
 const router = express.Router();
 
 const vacio = (v) => v === undefined || v === null || v === '';
 const sumar = (arr) => arr.reduce((acc, n) => acc + Number(n || 0), 0);
+
+const MONEDAS = ['BS', 'USD', 'COP'];
+
+/**
+ * Lineas de insumos que llegan del formulario. Se aceptan solo las que
+ * traen un insumo y una cantidad usable; el resto se descarta en silencio
+ * (son filas que el usuario agrego y dejo vacias).
+ */
+const normalizarInsumos = (lista) => {
+  if (!Array.isArray(lista)) return null;
+  return lista
+    .map((l) => ({ insumo_id: Number(l?.insumo_id), cantidad: Number(l?.cantidad) }))
+    .filter((l) => l.insumo_id > 0 && !Number.isNaN(l.cantidad) && l.cantidad > 0);
+};
 
 /**
  * Si viene detalle_litros (aportes de cada productor/rutero), los litros
@@ -65,6 +81,15 @@ const normalizarCampos = (body = {}) => {
   if (body.fecha !== undefined) datos.fecha = body.fecha;
   if (body.producto !== undefined) datos.producto = String(body.producto).trim();
   if (body.notas !== undefined) datos.notas = vacio(body.notas) ? null : String(body.notas).trim();
+
+  // Precio de la leche de este lote: se escribe a mano porque la leche no
+  // sale del inventario, entra por el registro diario de los productores.
+  if (body.precio_litro_leche !== undefined) {
+    datos.precio_litro_leche = vacio(body.precio_litro_leche) ? null : Number(body.precio_litro_leche);
+  }
+  if (body.moneda_leche !== undefined) {
+    datos.moneda_leche = vacio(body.moneda_leche) ? null : String(body.moneda_leche).toUpperCase();
+  }
   if (body.activo !== undefined) datos.activo = body.activo === true || body.activo === 'true';
 
   const huboLitros = body.litros_utilizados !== undefined || (Array.isArray(body.detalle_litros) && body.detalle_litros.length > 0);
@@ -91,6 +116,15 @@ const validarDatos = (datos, { esCreacion }) => {
     if (Number.isNaN(datos.litros_utilizados) || datos.litros_utilizados <= 0) {
       return 'Los litros utilizados deben ser un número mayor a 0.';
     }
+  }
+
+  if (datos.precio_litro_leche !== undefined && datos.precio_litro_leche !== null) {
+    if (Number.isNaN(datos.precio_litro_leche) || datos.precio_litro_leche < 0) {
+      return 'El precio de la leche debe ser un número mayor o igual a 0.';
+    }
+  }
+  if (datos.moneda_leche && !MONEDAS.includes(datos.moneda_leche)) {
+    return `Moneda inválida. Use una de: ${MONEDAS.join(', ')}.`;
   }
 
   if (esCreacion && vacio(datos.kilos_obtenidos)) {
@@ -146,6 +180,40 @@ const resumenPorProducto = asyncHandler(async (req, res) => {
   res.json({ success: true, data: resumen });
 });
 
+// La formula del ultimo lote de un producto. Sirve para que al elegir
+// "Semiduro" el formulario proponga lo que se gasto la vez pasada, en vez
+// de obligar a cargar todo de nuevo cada dia.
+const ultimaFormula = asyncHandler(async (req, res) => {
+  const producto = String(req.query.producto || '').trim();
+  if (!producto) return res.status(400).json({ success: false, message: 'Indique el producto.' });
+
+  const lote = await LoteProduccion.findOne({
+    where: { producto, activo: true },
+    order: [
+      ['fecha', 'DESC'],
+      ['id', 'DESC'],
+    ],
+  });
+
+  if (!lote || !Array.isArray(lote.insumos_usados) || lote.insumos_usados.length === 0) {
+    return res.json({ success: true, data: null });
+  }
+
+  res.json({
+    success: true,
+    data: {
+      lote_id: lote.id,
+      fecha: lote.fecha,
+      producto: lote.producto,
+      litros_utilizados: lote.litros_utilizados,
+      kilos_obtenidos: lote.kilos_obtenidos,
+      precio_litro_leche: lote.precio_litro_leche,
+      moneda_leche: lote.moneda_leche,
+      insumos_usados: lote.insumos_usados,
+    },
+  });
+});
+
 const obtener = asyncHandler(async (req, res) => {
   const lote = await LoteProduccion.findByPk(req.params.id);
   if (!lote) return res.status(404).json({ success: false, message: 'Lote de producción no encontrado.' });
@@ -158,14 +226,35 @@ const crear = asyncHandler(async (req, res) => {
   const error = validarDatos(datos, { esCreacion: true });
   if (error) return res.status(400).json({ success: false, message: error });
 
-  // fields limita el INSERT a exactamente las columnas que preparamos, asi
-  // Sequelize nunca incluye porcentaje_litro_kilo (columna generada).
-  const lote = await LoteProduccion.create(datos, { fields: Object.keys(datos) });
+  const insumos = normalizarInsumos(req.body.insumos_usados);
 
-  // reload trae el porcentaje ya calculado por la base de datos.
-  await lote.reload();
+  try {
+    // El lote y el descuento de inventario van en la MISMA transaccion: o
+    // se guarda todo, o no se guarda nada. Si un insumo no alcanza, el
+    // lote tampoco queda creado.
+    const lote = await sequelize.transaction(async (transaction) => {
+      // fields limita el INSERT a exactamente las columnas que preparamos,
+      // asi Sequelize nunca incluye porcentaje_litro_kilo (columna generada).
+      const creado = await LoteProduccion.create(datos, {
+        fields: Object.keys(datos),
+        transaction,
+      });
 
-  res.status(201).json({ success: true, data: lote });
+      if (insumos && insumos.length > 0) {
+        const foto = await produccionService.aplicarConsumo(creado, insumos, transaction);
+        await creado.update({ insumos_usados: foto }, { fields: ['insumos_usados'], transaction });
+      }
+
+      // reload trae el porcentaje ya calculado por la base de datos.
+      await creado.reload({ transaction });
+      return creado;
+    });
+
+    res.status(201).json({ success: true, data: lote });
+  } catch (err) {
+    if (err.esErrorDeNegocio) return res.status(400).json({ success: false, message: err.message });
+    throw err;
+  }
 });
 
 const actualizar = asyncHandler(async (req, res) => {
@@ -176,20 +265,67 @@ const actualizar = asyncHandler(async (req, res) => {
   const error = validarDatos(datos, { esCreacion: false });
   if (error) return res.status(400).json({ success: false, message: error });
 
-  // No recalculamos el porcentaje: al cambiar litros o kilos, Postgres
-  // regenera la columna automaticamente.
-  await lote.update(datos, { fields: Object.keys(datos) });
-  await lote.reload();
+  // Solo se toca el inventario si el formulario mando la formula. Un PUT
+  // que solo cambia las notas no devuelve ni vuelve a consumir nada.
+  const insumos = normalizarInsumos(req.body.insumos_usados);
+  const reactivando = datos.activo === true && lote.activo === false;
 
-  res.json({ success: true, data: lote });
+  try {
+    await sequelize.transaction(async (transaction) => {
+      if (insumos !== null) {
+        // Primero se devuelve TODO lo que este lote tenia consumido y
+        // despues se aplica la formula nueva. Asi da igual si el usuario
+        // subio, bajo o quito lineas.
+        await produccionService.revertirConsumo(lote, transaction);
+        const foto = await produccionService.aplicarConsumo(lote, insumos, transaction);
+        datos.insumos_usados = foto.length > 0 ? foto : null;
+      } else if (reactivando) {
+        // Se reactiva un lote anulado: vuelve a consumir su formula.
+        const guardada = Array.isArray(lote.insumos_usados) ? lote.insumos_usados : [];
+        if (guardada.length > 0) {
+          const foto = await produccionService.aplicarConsumo(lote, guardada, transaction);
+          datos.insumos_usados = foto;
+        }
+      }
+
+      // No recalculamos el porcentaje: al cambiar litros o kilos, Postgres
+      // regenera la columna automaticamente.
+      await lote.update(datos, { fields: Object.keys(datos), transaction });
+      await lote.reload({ transaction });
+    });
+
+    res.json({ success: true, data: lote });
+  } catch (err) {
+    if (err.esErrorDeNegocio) return res.status(400).json({ success: false, message: err.message });
+    throw err;
+  }
 });
 
 const eliminar = asyncHandler(async (req, res) => {
   const lote = await LoteProduccion.findByPk(req.params.id);
   if (!lote) return res.status(404).json({ success: false, message: 'Lote de producción no encontrado.' });
 
-  await lote.update({ activo: false }, { fields: ['activo'] });
-  res.json({ success: true, message: 'Lote de producción desactivado.' });
+  try {
+    const devueltos = await sequelize.transaction(async (transaction) => {
+      // Al anular el lote, lo que gasto vuelve al inventario. La formula
+      // se conserva en insumos_usados por si se reactiva.
+      const lista = await produccionService.revertirConsumo(lote, transaction);
+      await lote.update({ activo: false }, { fields: ['activo'], transaction });
+      return lista;
+    });
+
+    res.json({
+      success: true,
+      message:
+        devueltos.length > 0
+          ? `Lote anulado. Se devolvieron ${devueltos.length} insumo(s) al inventario.`
+          : 'Lote anulado.',
+      data: { devueltos },
+    });
+  } catch (err) {
+    if (err.esErrorDeNegocio) return res.status(400).json({ success: false, message: err.message });
+    throw err;
+  }
 });
 
 // ---------- Reglas de validación ----------
@@ -209,12 +345,24 @@ const reglasLote = (esCreacion) => [
   body('detalle_litros').optional({ nullable: true }).isArray().withMessage('El detalle de litros debe ser una lista'),
   body('detalle_pesos').optional({ nullable: true }).isArray().withMessage('El detalle de pesos debe ser una lista'),
   body('notas').optional({ nullable: true }).isLength({ max: 255 }).withMessage('Nota demasiado larga'),
+  body('insumos_usados').optional({ nullable: true }).isArray().withMessage('Los insumos gastados deben ser una lista'),
+  body('precio_litro_leche')
+    .optional({ nullable: true })
+    .customSanitizer((v) => (v === '' ? null : v))
+    .custom((v) => v === null || (!Number.isNaN(Number(v)) && Number(v) >= 0))
+    .withMessage('El precio de la leche debe ser un número mayor o igual a 0'),
+  body('moneda_leche')
+    .optional({ nullable: true })
+    .customSanitizer((v) => (v ? String(v).toUpperCase() : v))
+    .isIn(MONEDAS)
+    .withMessage(`Moneda inválida. Use: ${MONEDAS.join(', ')}`),
 ];
 
 router.use(proteger);
 
 router.get('/', [query('activo').optional().isIn(['true', 'false'])], validar, listar);
 router.get('/resumen-por-producto', resumenPorProducto);
+router.get('/ultima-formula', ultimaFormula);
 router.get('/:id', [param('id').isInt().withMessage('Id inválido')], validar, obtener);
 router.post('/', reglasLote(true), validar, crear);
 router.put('/:id', [param('id').isInt().withMessage('Id inválido'), ...reglasLote(false)], validar, actualizar);
