@@ -2,7 +2,7 @@ const express = require('express');
 const { body, param, query } = require('express-validator');
 const { Op } = require('sequelize');
 
-const { LoteProduccion, Insumo, MovimientoInsumo, sequelize } = require('../../models');
+const { LoteProduccion, Insumo, MovimientoInsumo, MovimientoCuartoFrio, sequelize } = require('../../models');
 const asyncHandler = require('../../utils/asyncHandler');
 const { proteger, permitirRoles } = require('../../middlewares/auth.middleware');
 const validar = require('../../middlewares/validate.middleware');
@@ -13,6 +13,7 @@ const validar = require('../../middlewares/validate.middleware');
 const { calcularPorcentajeLitroKilo } = require('../../services/calculo.service');
 const { ErrorDeNegocio } = require('../../services/insumos.service');
 const produccionService = require('../../services/produccion.service');
+const cuartoFrioService = require('../../services/cuartoFrio.service');
 
 const router = express.Router();
 
@@ -26,6 +27,21 @@ const MONEDAS = ['BS', 'USD', 'COP'];
  * traen un insumo y una cantidad usable; el resto se descarta en silencio
  * (son filas que el usuario agrego y dejo vacias).
  */
+/**
+ * Quesos del cuarto frio que se van a fundir en este lote.
+ * [{ producto, kilos, piezas }]
+ */
+const normalizarReproceso = (lista) => {
+  if (!Array.isArray(lista)) return null;
+  return lista
+    .map((l) => ({
+      producto: String(l?.producto || '').trim(),
+      kilos: Number(l?.kilos),
+      piezas: vacio(l?.piezas) ? null : Number.parseInt(l.piezas, 10),
+    }))
+    .filter((l) => l.producto && !Number.isNaN(l.kilos) && l.kilos > 0);
+};
+
 const normalizarInsumos = (lista) => {
   if (!Array.isArray(lista)) return null;
   return lista
@@ -139,6 +155,17 @@ const validarDatos = (datos, { esCreacion }) => {
   return null;
 };
 
+// Los movimientos de cuarto frio del lote viajan con el: la pantalla los
+// necesita para reponer el bloque de reproceso al editar.
+const incluirCuartoFrio = [
+  {
+    model: MovimientoCuartoFrio,
+    as: 'MovimientosCuartoFrio',
+    required: false,
+    attributes: ['id', 'producto', 'tipo', 'signo', 'kilos', 'piezas'],
+  },
+];
+
 const listar = asyncHandler(async (req, res) => {
   const { producto, fecha_inicio, fecha_fin, activo } = req.query;
   const where = {};
@@ -148,6 +175,7 @@ const listar = asyncHandler(async (req, res) => {
 
   const lotes = await LoteProduccion.findAll({
     where,
+    include: incluirCuartoFrio,
     order: [
       ['fecha', 'DESC'],
       ['id', 'DESC'],
@@ -215,7 +243,7 @@ const ultimaFormula = asyncHandler(async (req, res) => {
 });
 
 const obtener = asyncHandler(async (req, res) => {
-  const lote = await LoteProduccion.findByPk(req.params.id);
+  const lote = await LoteProduccion.findByPk(req.params.id, { include: incluirCuartoFrio });
   if (!lote) return res.status(404).json({ success: false, message: 'Lote de producción no encontrado.' });
   res.json({ success: true, data: lote });
 });
@@ -227,6 +255,7 @@ const crear = asyncHandler(async (req, res) => {
   if (error) return res.status(400).json({ success: false, message: error });
 
   const insumos = normalizarInsumos(req.body.insumos_usados);
+  const reproceso = normalizarReproceso(req.body.reproceso_cuarto_frio);
 
   try {
     // El lote y el descuento de inventario van en la MISMA transaccion: o
@@ -244,6 +273,15 @@ const crear = asyncHandler(async (req, res) => {
         const foto = await produccionService.aplicarConsumo(creado, insumos, transaction);
         await creado.update({ insumos_usados: foto }, { fields: ['insumos_usados'], transaction });
       }
+
+      // Quesos viejos que se funden en este lote: salen del cuarto frio.
+      if (reproceso && reproceso.length > 0) {
+        await cuartoFrioService.aplicarReproceso(creado, reproceso, transaction);
+      }
+
+      // Y lo que se fabrico entra al cuarto frio, sin que nadie lo cargue
+      // a mano: es el mismo dato de kilos_obtenidos del lote.
+      await cuartoFrioService.registrarProduccion(creado, transaction);
 
       // reload trae el porcentaje ya calculado por la base de datos.
       await creado.reload({ transaction });
@@ -268,7 +306,17 @@ const actualizar = asyncHandler(async (req, res) => {
   // Solo se toca el inventario si el formulario mando la formula. Un PUT
   // que solo cambia las notas no devuelve ni vuelve a consumir nada.
   const insumos = normalizarInsumos(req.body.insumos_usados);
+  const reproceso = normalizarReproceso(req.body.reproceso_cuarto_frio);
   const reactivando = datos.activo === true && lote.activo === false;
+  const anulando = datos.activo === false && lote.activo === true;
+
+  // Si cambian los kilos o el producto, lo que este lote metio al cuarto
+  // frio deja de ser cierto y hay que rehacerlo.
+  const cambioLoProducido =
+    (datos.kilos_obtenidos !== undefined && Number(datos.kilos_obtenidos) !== Number(lote.kilos_obtenidos)) ||
+    (datos.cantidad_unidades !== undefined && Number(datos.cantidad_unidades) !== Number(lote.cantidad_unidades)) ||
+    (datos.producto !== undefined && datos.producto !== lote.producto) ||
+    (datos.fecha !== undefined && String(datos.fecha) !== String(lote.fecha));
 
   try {
     await sequelize.transaction(async (transaction) => {
@@ -288,10 +336,30 @@ const actualizar = asyncHandler(async (req, res) => {
         }
       }
 
+      if (reproceso !== null) {
+        await cuartoFrioService.revertirReproceso(lote, transaction);
+      }
+
       // No recalculamos el porcentaje: al cambiar litros o kilos, Postgres
       // regenera la columna automaticamente.
       await lote.update(datos, { fields: Object.keys(datos), transaction });
       await lote.reload({ transaction });
+
+      // ---- Cuarto frio ----
+      if (anulando) {
+        await cuartoFrioService.revertirProduccion(lote, transaction);
+        await cuartoFrioService.revertirReproceso(lote, transaction);
+      } else {
+        if (cambioLoProducido || reactivando) {
+          // Se borra la entrada anterior y se vuelve a meter con los
+          // datos nuevos, en vez de intentar calcular la diferencia.
+          await cuartoFrioService.revertirProduccion(lote, transaction);
+          await cuartoFrioService.registrarProduccion(lote, transaction);
+        }
+        if (reproceso !== null && reproceso.length > 0) {
+          await cuartoFrioService.aplicarReproceso(lote, reproceso, transaction);
+        }
+      }
     });
 
     res.json({ success: true, data: lote });
@@ -310,6 +378,12 @@ const eliminar = asyncHandler(async (req, res) => {
       // Al anular el lote, lo que gasto vuelve al inventario. La formula
       // se conserva en insumos_usados por si se reactiva.
       const lista = await produccionService.revertirConsumo(lote, transaction);
+
+      // El queso que este lote habia metido sale del cuarto frio, y lo
+      // que hubiera tomado de alli para reprocesar vuelve.
+      await cuartoFrioService.revertirProduccion(lote, transaction);
+      await cuartoFrioService.revertirReproceso(lote, transaction);
+
       await lote.update({ activo: false }, { fields: ['activo'], transaction });
       return lista;
     });
@@ -346,6 +420,10 @@ const reglasLote = (esCreacion) => [
   body('detalle_pesos').optional({ nullable: true }).isArray().withMessage('El detalle de pesos debe ser una lista'),
   body('notas').optional({ nullable: true }).isLength({ max: 255 }).withMessage('Nota demasiado larga'),
   body('insumos_usados').optional({ nullable: true }).isArray().withMessage('Los insumos gastados deben ser una lista'),
+  body('reproceso_cuarto_frio')
+    .optional({ nullable: true })
+    .isArray()
+    .withMessage('Los quesos reprocesados deben ser una lista'),
   body('precio_litro_leche')
     .optional({ nullable: true })
     .customSanitizer((v) => (v === '' ? null : v))
