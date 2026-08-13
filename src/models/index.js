@@ -13,6 +13,9 @@ const Insumo = require('./insumo.model')(sequelize, DataTypes);
 const MovimientoInsumo = require('./movimientoInsumo.model')(sequelize, DataTypes);
 const LoteProduccion = require('./loteProduccion.model')(sequelize, DataTypes);
 const MovimientoCuartoFrio = require('./movimientoCuartoFrio.model')(sequelize, DataTypes);
+const Empleado = require('./empleado.model')(sequelize, DataTypes);
+const PagoNomina = require('./pagoNomina.model')(sequelize, DataTypes);
+const MovimientoCaja = require('./movimientoCaja.model')(sequelize, DataTypes);
 
 const db = {
   sequelize,
@@ -29,6 +32,9 @@ const db = {
   MovimientoInsumo,
   LoteProduccion,
   MovimientoCuartoFrio,
+  Empleado,
+  PagoNomina,
+  MovimientoCaja,
 };
 
 // Relaciones que ya vienen definidas dentro de cada model
