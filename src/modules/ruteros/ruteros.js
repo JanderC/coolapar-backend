@@ -467,6 +467,153 @@ const registrarPago = asyncHandler(async (req, res) => {
 });
 
 // @route GET /api/ruteros/historial?rutero_id=
+// ============================================================
+//  RESUMEN DE LA SEMANA (todos los ruteros de un rango)
+//
+//  Va al reves que la hoja: en vez de partir de un rutero y ver su
+//  semana, parte del rango y trae a todos los que trajeron leche esos
+//  dias, con su litraje dia por dia.
+//
+//  Es de SOLO LECTURA: no toca semanas_pago.
+// ============================================================
+const MAX_DIAS_RESUMEN = 92;
+
+// @route GET /api/ruteros/resumen-semana?fecha_inicio=&fecha_fin=
+const resumenSemana = asyncHandler(async (req, res) => {
+  const desde = aTexto(req.query.fecha_inicio);
+  const hasta = aTexto(req.query.fecha_fin);
+
+  if (!esFechaValida(desde) || !esFechaValida(hasta)) {
+    return res.status(400).json({ success: false, message: 'Indique la fecha de inicio y la de cierre.' });
+  }
+  if (desde > hasta) {
+    return res.status(400).json({ success: false, message: 'La fecha de inicio debe ser anterior a la de cierre.' });
+  }
+
+  const fechas = rangoFechas(desde, hasta);
+  if (fechas.length > MAX_DIAS_RESUMEN) {
+    return res.status(400).json({
+      success: false,
+      message: `El rango no puede pasar de ${MAX_DIAS_RESUMEN} días. Consulte por semanas.`,
+    });
+  }
+
+  const registros = await RegistroLecheRutero.findAll({
+    where: { fecha: { [Op.between]: [desde, hasta] } },
+    include: [{ model: Rutero, as: 'Rutero', required: false, attributes: ['id', 'nombre', 'precio_litro', 'moneda'] }],
+    order: [
+      ['rutero_id', 'ASC'],
+      ['fecha', 'ASC'],
+    ],
+  });
+
+  // Columnas de la tabla: todos los dias del rango, traigan leche o no.
+  const columnas = fechas.map((f) => ({ fecha: f, dia: nombreDia(f) }));
+
+  const porRutero = new Map();
+
+  registros.forEach((r) => {
+    const litros = aNumero(r.litros, 0);
+    const sobrante = aNumero(r.sobrante, 0);
+    const faltante = aNumero(r.faltante, 0);
+    if (litros <= 0 && sobrante <= 0 && faltante <= 0) return;
+
+    const id = Number(r.rutero_id);
+    if (!porRutero.has(id)) {
+      const t = r.Rutero;
+      porRutero.set(id, {
+        rutero_id: id,
+        nombre: t?.nombre || `Rutero ${id}`,
+        precio_litro: aNumero(t?.precio_litro, 0),
+        moneda: normalizarMoneda(t?.moneda, 'COP'),
+        porFecha: new Map(),
+        dias_con_leche: 0,
+        total_litros: 0,
+        total_sobrante: 0,
+        total_faltante: 0,
+      });
+    }
+
+    const fila = porRutero.get(id);
+    const fecha = aTexto(r.fecha);
+
+    fila.dias_con_leche += litros > 0 ? 1 : 0;
+    fila.porFecha.set(fecha, {
+      fecha,
+      dia: nombreDia(fecha),
+      litros: redondear(litros),
+      sobrante: redondear(sobrante),
+      faltante: redondear(faltante),
+      descripcion: r.descripcion || '',
+    });
+
+    fila.total_litros += litros;
+    fila.total_sobrante += sobrante;
+    fila.total_faltante += faltante;
+  });
+
+  const ruteros = [...porRutero.values()]
+    .map((f) => {
+      // Se rellenan los dias sin leche para que todas las filas tengan
+      // las mismas columnas y la tabla cuadre.
+      const dias = columnas.map(
+        (c) => f.porFecha.get(c.fecha) || { fecha: c.fecha, dia: c.dia, litros: 0, sobrante: 0, faltante: 0, descripcion: '' }
+      );
+
+      return {
+        rutero_id: f.rutero_id,
+        nombre: f.nombre,
+        moneda: f.moneda,
+        precio_litro: redondear(f.precio_litro),
+        dias,
+        dias_con_leche: f.dias_con_leche,
+        total_litros: redondear(f.total_litros),
+        total_sobrante: redondear(f.total_sobrante),
+        total_faltante: redondear(f.total_faltante),
+        total_pagar: redondear(f.total_litros * f.precio_litro),
+      };
+    })
+    .sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+
+  // Litros recibidos por dia, sumando a todos los ruteros.
+  const totalesPorDia = columnas.map((c) => {
+    let litros = 0;
+    ruteros.forEach((t) => {
+      const d = t.dias.find((x) => x.fecha === c.fecha);
+      if (d) litros += d.litros;
+    });
+    return { fecha: c.fecha, dia: c.dia, total_litros: redondear(litros) };
+  });
+
+  // El dinero se agrupa por moneda: nunca se suman entre si.
+  const porMoneda = new Map();
+  ruteros.forEach((t) => {
+    if (!porMoneda.has(t.moneda)) {
+      porMoneda.set(t.moneda, { moneda: t.moneda, ruteros: 0, total_litros: 0, total_pagar: 0 });
+    }
+    const acumulado = porMoneda.get(t.moneda);
+    acumulado.ruteros += 1;
+    acumulado.total_litros = redondear(acumulado.total_litros + t.total_litros);
+    acumulado.total_pagar = redondear(acumulado.total_pagar + t.total_pagar);
+  });
+
+  res.json({
+    success: true,
+    data: {
+      rango: { fecha_inicio: desde, fecha_fin: hasta, dias: fechas.length, columnas },
+      ruteros,
+      totales_por_dia: totalesPorDia,
+      totales_por_moneda: [...porMoneda.values()].sort((a, b) => a.moneda.localeCompare(b.moneda)),
+      totales: {
+        ruteros: ruteros.length,
+        total_litros: redondear(ruteros.reduce((s, t) => s + t.total_litros, 0)),
+        total_sobrante: redondear(ruteros.reduce((s, t) => s + t.total_sobrante, 0)),
+        total_faltante: redondear(ruteros.reduce((s, t) => s + t.total_faltante, 0)),
+      },
+    },
+  });
+});
+
 // @route GET /api/ruteros/historial?rutero_id=&estado_pago=&fecha_inicio=&fecha_fin=
 const historial = asyncHandler(async (req, res) => {
   const rutero = await Rutero.findByPk(req.query.rutero_id);
@@ -611,6 +758,13 @@ router.post(
 router.get('/historial', [query('rutero_id').isInt()], validar, historial);
 // Solo lectura: no crea ni modifica semanas. Es la que usa la impresión.
 router.get('/hoja-consulta', [query('rutero_id').isInt()], validar, hojaConsulta);
+// Todos los ruteros de un rango de fechas, día por día.
+router.get(
+  '/resumen-semana',
+  [query('fecha_inicio').isISO8601(), query('fecha_fin').isISO8601()],
+  validar,
+  resumenSemana
+);
 router.get('/pagos', listarPagos);
 
 router.get('/', listar);
