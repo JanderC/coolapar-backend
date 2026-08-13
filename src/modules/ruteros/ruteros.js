@@ -233,6 +233,92 @@ const armarHoja = async (rutero, semana) => {
   };
 };
 
+/**
+ * Igual que armarHoja, pero para un rango de fechas suelto y SIN semana.
+ * Se usa solo para consultar e imprimir.
+ */
+const armarHojaRango = async (rutero, desde, hasta) => {
+  const fechas = rangoFechas(desde, hasta);
+
+  const registros = await RegistroLecheRutero.findAll({
+    where: { rutero_id: rutero.id, fecha: { [Op.between]: [desde, hasta] } },
+    order: [['fecha', 'ASC']],
+  });
+
+  const porFecha = new Map(registros.map((r) => [aTexto(r.fecha), r]));
+
+  const dias = fechas.map((fecha) => {
+    const r = porFecha.get(fecha);
+    return {
+      fecha,
+      dia: nombreDia(fecha),
+      registro_id: r?.id || null,
+      litros: r ? Number(r.litros) : null,
+      sobrante: r ? Number(r.sobrante) : 0,
+      faltante: r ? Number(r.faltante) : 0,
+      descripcion: r?.descripcion || '',
+    };
+  });
+
+  const conDatos = dias.filter((d) => d.litros !== null);
+  const total_litros = redondear(conDatos.reduce((s, d) => s + d.litros, 0));
+  const precio_litro = Number(rutero.precio_litro || 0);
+
+  return {
+    rutero: {
+      id: rutero.id,
+      nombre: rutero.nombre,
+      telefono: rutero.telefono,
+      precio_litro,
+      moneda: rutero.moneda,
+    },
+    semana: null,
+    precio_litro,
+    moneda: normalizarMoneda(rutero.moneda, 'COP'),
+    dias,
+    totales: {
+      dias_con_leche: conDatos.length,
+      total_litros,
+      total_sobrante: redondear(dias.reduce((s, d) => s + (d.sobrante || 0), 0)),
+      total_faltante: redondear(dias.reduce((s, d) => s + (d.faltante || 0), 0)),
+      total_pagar: redondear(total_litros * precio_litro),
+    },
+    pago: null,
+  };
+};
+
+/**
+ * Hoja de SOLO LECTURA. Existe aparte de /hoja porque aquella pasa por
+ * resolverSemana, que CREA o AJUSTA la semana si no existe: imprimir o
+ * consultar no puede tener ese efecto.
+ *
+ * @route GET /api/ruteros/hoja-consulta?rutero_id=&semana_id=
+ *        o bien ?rutero_id=&fecha_inicio=&fecha_fin=
+ */
+const hojaConsulta = asyncHandler(async (req, res) => {
+  const rutero = await Rutero.findByPk(req.query.rutero_id);
+  if (!rutero) return res.status(404).json({ success: false, message: 'Rutero no encontrado.' });
+
+  if (!vacio(req.query.semana_id)) {
+    const semana = await SemanaPago.findByPk(req.query.semana_id);
+    if (!semana) return res.status(404).json({ success: false, message: 'Semana no encontrada.' });
+    if (semana.rutero_id && Number(semana.rutero_id) !== Number(rutero.id)) {
+      return res.status(400).json({ success: false, message: 'Esa semana pertenece a otro rutero.' });
+    }
+    return res.json({ success: true, data: await armarHoja(rutero, semana) });
+  }
+
+  const { fecha_inicio, fecha_fin } = req.query;
+  if (!esFechaValida(fecha_inicio) || !esFechaValida(fecha_fin)) {
+    return res.status(400).json({ success: false, message: 'Indique la semana o un rango de fechas válido.' });
+  }
+  if (fecha_inicio > fecha_fin) {
+    return res.status(400).json({ success: false, message: 'La fecha de inicio debe ser anterior a la de cierre.' });
+  }
+
+  res.json({ success: true, data: await armarHojaRango(rutero, fecha_inicio, fecha_fin) });
+});
+
 // @route GET /api/ruteros/hoja?rutero_id=&dia_inicio=&dia_fin=  (o &semana_id=)
 const obtenerHoja = asyncHandler(async (req, res) => {
   const rutero = await Rutero.findByPk(req.query.rutero_id);
@@ -381,25 +467,38 @@ const registrarPago = asyncHandler(async (req, res) => {
 });
 
 // @route GET /api/ruteros/historial?rutero_id=
+// @route GET /api/ruteros/historial?rutero_id=&estado_pago=&fecha_inicio=&fecha_fin=
 const historial = asyncHandler(async (req, res) => {
   const rutero = await Rutero.findByPk(req.query.rutero_id);
   if (!rutero) return res.status(404).json({ success: false, message: 'Rutero no encontrado.' });
 
+  const where = { rutero_id: rutero.id };
+  // Acotar por fechas sirve para responder "cuánto se le pagó en agosto".
+  if (!vacio(req.query.fecha_inicio) && !vacio(req.query.fecha_fin)) {
+    where.fecha_inicio = { [Op.between]: [req.query.fecha_inicio, req.query.fecha_fin] };
+  }
+
+  const limite = Math.min(Number(req.query.limite) || 52, 200);
+
   const semanas = await SemanaPago.findAll({
-    where: { rutero_id: rutero.id },
+    where,
     order: [['fecha_inicio', 'DESC']],
-    limit: 20,
+    limit: limite,
   });
 
   const pagos = await PagoRutero.findAll({
     where: { rutero_id: rutero.id, semana_id: semanas.map((s) => s.id) },
   });
 
-  const data = semanas.map((s) => {
+  let data = semanas.map((s) => {
     const pago = pagos.find((p) => Number(p.semana_id) === Number(s.id));
     return {
       id: s.id,
       estado: s.estado,
+      // Las fechas son lo que permite saber DE QUE semana se habla:
+      // "lunes a domingo" solo, no distingue una semana de otra.
+      fecha_inicio: s.fecha_inicio,
+      fecha_fin: s.fecha_fin,
       dia_inicio: s.dia_inicio,
       dia_fin: s.dia_fin,
       etiqueta: etiquetaDias(s.dia_inicio, s.dia_fin),
@@ -408,10 +507,35 @@ const historial = asyncHandler(async (req, res) => {
       moneda: pago?.moneda || rutero.moneda,
       estado_pago: pago?.estado_pago || null,
       fecha_pago: pago?.fecha_pago || null,
+      pagada: pago?.estado_pago === 'pagado',
     };
   });
 
-  res.json({ success: true, data });
+  // Filtro de "solo las semanas que ya le pagué" (o las que faltan).
+  if (req.query.estado_pago === 'pagado') data = data.filter((s) => s.pagada);
+  if (req.query.estado_pago === 'pendiente') data = data.filter((s) => !s.pagada);
+
+  // El dinero se agrupa por moneda: nunca se suman entre sí.
+  const porMoneda = new Map();
+  data
+    .filter((s) => s.pagada)
+    .forEach((s) => {
+      if (!porMoneda.has(s.moneda)) porMoneda.set(s.moneda, { moneda: s.moneda, semanas: 0, total_pagar: 0 });
+      const acumulado = porMoneda.get(s.moneda);
+      acumulado.semanas += 1;
+      acumulado.total_pagar = redondear(acumulado.total_pagar + s.total_pagar);
+    });
+
+  res.json({
+    success: true,
+    data,
+    resumen: {
+      semanas: data.length,
+      semanas_pagadas: data.filter((s) => s.pagada).length,
+      total_litros: redondear(data.reduce((acc, s) => acc + s.total_litros, 0)),
+      pagado_por_moneda: [...porMoneda.values()].sort((a, b) => a.moneda.localeCompare(b.moneda)),
+    },
+  });
 });
 
 // @route GET /api/ruteros/pagos?semana_id=&rutero_id=
@@ -485,6 +609,8 @@ router.post(
 );
 
 router.get('/historial', [query('rutero_id').isInt()], validar, historial);
+// Solo lectura: no crea ni modifica semanas. Es la que usa la impresión.
+router.get('/hoja-consulta', [query('rutero_id').isInt()], validar, hojaConsulta);
 router.get('/pagos', listarPagos);
 
 router.get('/', listar);
