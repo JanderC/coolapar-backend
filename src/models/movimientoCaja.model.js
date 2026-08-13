@@ -2,17 +2,22 @@ const MONEDAS = ['BS', 'USD', 'COP'];
 const TIPOS = ['ingreso', 'egreso'];
 
 // Categorias que se pueden cargar a mano en el libro.
-const CATEGORIAS_INGRESO = ['venta', 'otro_ingreso'];
-const CATEGORIAS_EGRESO = ['nomina', 'adelanto', 'compra_insumo', 'servicio', 'otro_egreso'];
+const CATEGORIAS_INGRESO = ['venta', 'abono_prestamo', 'otro_ingreso'];
+const CATEGORIAS_EGRESO = ['nomina', 'adelanto', 'prestamo', 'compra', 'compra_insumo', 'servicio', 'otro_egreso'];
 const CATEGORIAS = [...CATEGORIAS_INGRESO, ...CATEGORIAS_EGRESO];
 
 // Como se llama cada categoria en pantalla, para que los reportes y la
 // interfaz digan siempre lo mismo.
 const ETIQUETAS = {
   venta: 'Venta',
+  abono_prestamo: 'Abono a préstamo',
   otro_ingreso: 'Otro ingreso',
   nomina: 'Pago de nómina',
+  // Se descuenta del proximo sueldo.
   adelanto: 'Adelanto a empleado',
+  // NO se descuenta del sueldo: la persona lo va cancelando.
+  prestamo: 'Préstamo entregado',
+  compra: 'Compra',
   compra_insumo: 'Compra de insumos',
   servicio: 'Servicios y gastos',
   otro_egreso: 'Otro egreso',
@@ -72,6 +77,10 @@ module.exports = (sequelize, DataTypes) => {
 
       empleado_id: { type: DataTypes.INTEGER, allowNull: true },
       pago_nomina_id: { type: DataTypes.INTEGER, allowNull: true },
+
+      // Prestamo al que pertenece: el desembolso (egreso) y cada abono
+      // que la persona va pagando (ingreso).
+      prestamo_id: { type: DataTypes.INTEGER, allowNull: true },
 
       // Solo en los adelantos: el recibo donde ya se descontó. Mientras
       // sea null, el adelanto sigue pendiente.

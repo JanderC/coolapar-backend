@@ -1,5 +1,5 @@
 const { Op } = require('sequelize');
-const { Empleado, PagoNomina, MovimientoCaja, sequelize } = require('../models');
+const { Empleado, PagoNomina, MovimientoCaja, Prestamo, sequelize } = require('../models');
 const { ErrorDeNegocio } = require('./insumos.service');
 
 /**
@@ -46,6 +46,33 @@ const previsualizar = async (empleadoId, { periodo_fin = null } = {}) => {
   const totalAdelantos = redondear(adelantos.reduce((s, a) => s + Number(a.monto), 0));
   const sueldo = redondear(empleado.sueldo);
 
+  // Los prestamos se INFORMAN pero no se descuentan: la persona los va
+  // cancelando aparte. Mezclarlos con el sueldo seria justo lo contrario
+  // de lo que se pidio.
+  let prestamosAbiertos = [];
+  if (Prestamo) {
+    const abiertos = await Prestamo.findAll({
+      where: { empleado_id: empleadoId, estado: 'abierto' },
+    });
+    const abonos = await MovimientoCaja.findAll({
+      where: { prestamo_id: abiertos.map((p) => p.id), categoria: 'abono_prestamo', anulado: false },
+      attributes: ['prestamo_id', 'monto'],
+    });
+    prestamosAbiertos = abiertos.map((p) => {
+      const pagado = abonos
+        .filter((a) => a.prestamo_id === p.id)
+        .reduce((s, a) => s + Number(a.monto), 0);
+      return {
+        id: p.id,
+        fecha: p.fecha,
+        monto: redondear(p.monto),
+        moneda: p.moneda,
+        saldo: redondear(Number(p.monto) - pagado),
+        motivo: p.motivo,
+      };
+    });
+  }
+
   return {
     empleado: {
       id: empleado.id,
@@ -64,6 +91,8 @@ const previsualizar = async (empleadoId, { periodo_fin = null } = {}) => {
     })),
     total_adelantos: totalAdelantos,
     neto_estimado: redondear(sueldo - totalAdelantos),
+    // Solo informativo: NO entra en el neto.
+    prestamos_abiertos: prestamosAbiertos,
     // Aviso util: un adelanto en otra moneda no se puede restar del
     // sueldo sin una tasa, asi que se deja fuera y se avisa.
     adelantos_en_otra_moneda: adelantos

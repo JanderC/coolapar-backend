@@ -3,6 +3,32 @@ const db = require('../models');
 const { MovimientoCaja, Empleado } = db;
 const { ErrorDeNegocio } = require('./insumos.service');
 
+/**
+ * Libro de caja: todo lo que entra y todo lo que sale, en un solo sitio.
+ *
+ * Hay dos fuentes y a proposito son distintas:
+ *
+ *  1. movimientos_caja  -> lo que se carga en este modulo (ventas,
+ *     nomina, adelantos, gastos).
+ *  2. Las tablas de pagos que YA existian (pagos a productores y a
+ *     ruteros). Esas NO se copian: se leen donde estan. Copiarlas
+ *     significaria tener el mismo pago en dos lugares y, tarde o
+ *     temprano, dos cifras distintas para la misma plata.
+ *
+ * Lo derivado sale marcado con `derivado: true` y no se puede editar
+ * desde aqui: se corrige donde se registro.
+ */
+
+// ============================================================
+//  ADAPTADOR DE LAS TABLAS DE PAGOS QUE YA EXISTEN
+//
+//  Cada instalacion nombra sus columnas distinto. En vez de adivinar,
+//  se busca el primer nombre que exista de verdad en el modelo.
+//
+//  SI ALGUN IMPORTE SALE EN CERO O UNA FECHA VACIA, es que la columna
+//  se llama de otra forma: agregue el nombre real al principio de la
+//  lista que corresponda y listo.
+// ============================================================
 const CANDIDATOS = {
   monto: ['monto', 'total', 'monto_pagado', 'total_pagado', 'monto_total', 'total_pagar', 'importe'],
   fecha: ['fecha_pago', 'fecha', 'fecha_registro'],
@@ -30,6 +56,60 @@ const describirFuente = (Modelo, { categoria, campoPersona, ModeloPersona }) => 
   return { Modelo, categoria, campos, campoPersona, ModeloPersona };
 };
 
+/**
+ * Compras de insumos: ya estan registradas como entradas del inventario,
+ * con su precio y su moneda. Se leen de alli en vez de pedir que se
+ * carguen otra vez en el libro.
+ *
+ * Las entradas SIN precio se ignoran a proposito: son las devoluciones
+ * que genera produccion.service.js al corregir un lote, no compras.
+ */
+const leerComprasInventario = async ({ desde, hasta }) => {
+  const { MovimientoInsumo, Insumo } = db;
+  if (!MovimientoInsumo) return [];
+
+  const where = { tipo: 'entrada', precio_unitario: { [Op.ne]: null } };
+  if (desde && hasta) where.fecha = { [Op.between]: [desde, hasta] };
+
+  let filas = [];
+  try {
+    filas = await MovimientoInsumo.findAll({ where, order: [['fecha', 'DESC']], limit: 500 });
+  } catch {
+    return [];
+  }
+
+  let nombres = new Map();
+  const ids = [...new Set(filas.map((f) => f.insumo_id).filter(Boolean))];
+  if (Insumo && ids.length > 0) {
+    const insumos = await Insumo.findAll({ where: { id: ids }, attributes: ['id', 'nombre', 'unidad_medida'] });
+    nombres = new Map(insumos.map((i) => [Number(i.id), i]));
+  }
+
+  return filas.map((f) => {
+    const insumo = nombres.get(Number(f.insumo_id));
+    const cantidad = Number(f.cantidad);
+    const total = redondear(cantidad * Number(f.precio_unitario));
+    return {
+      id: `compra_inventario-${f.id}`,
+      origen_id: f.id,
+      derivado: true,
+      fecha: f.fecha,
+      tipo: 'egreso',
+      categoria: 'compra_inventario',
+      etiqueta_categoria: ETIQUETAS.compra_inventario || 'Compra de inventario',
+      concepto: insumo
+        ? `${cantidad} ${insumo.unidad_medida} de ${insumo.nombre}`
+        : `Compra de insumo #${f.insumo_id}`,
+      contraparte: null,
+      monto: total,
+      moneda: f.moneda || 'BS',
+      metodo_pago: null,
+      referencia: f.descripcion || null,
+      anulado: false,
+    };
+  });
+};
+
 const FUENTES_DERIVADAS = [
   describirFuente(db.PagoProductor, {
     categoria: 'pago_productor',
@@ -44,6 +124,10 @@ const FUENTES_DERIVADAS = [
 ].filter(Boolean);
 
 const redondear = (n) => Number(Number(n || 0).toFixed(2));
+
+// Categorias que NO se guardan en movimientos_caja: se leen de las
+// tablas donde ya estaban registradas.
+const CATEGORIAS_DERIVADAS = ['pago_productor', 'pago_rutero', 'compra_inventario'];
 
 const ETIQUETAS = MovimientoCaja.ETIQUETAS;
 
@@ -138,12 +222,13 @@ const libro = async ({ fecha_inicio, fecha_fin, categoria, moneda, incluir_deriv
   const propios = await leerPropios({ desde, hasta, categoria, moneda });
 
   let derivados = [];
-  if (incluir_derivados && (!categoria || ['pago_productor', 'pago_rutero'].includes(categoria))) {
-    const lotes = await Promise.all(
-      FUENTES_DERIVADAS.filter((f) => !categoria || f.categoria === categoria).map((f) =>
+  if (incluir_derivados && (!categoria || CATEGORIAS_DERIVADAS.includes(categoria))) {
+    const lotes = await Promise.all([
+      ...FUENTES_DERIVADAS.filter((f) => !categoria || f.categoria === categoria).map((f) =>
         leerDerivados(f, { desde, hasta })
-      )
-    );
+      ),
+      !categoria || categoria === 'compra_inventario' ? leerComprasInventario({ desde, hasta }) : [],
+    ]);
     derivados = lotes.flat();
     if (moneda) derivados = derivados.filter((d) => d.moneda === moneda);
   }
@@ -200,7 +285,7 @@ const libro = async ({ fecha_inicio, fecha_fin, categoria, moneda, incluir_deriv
       (a, b) => b.total - a.total || a.categoria.localeCompare(b.categoria)
     ),
     // Para que la pantalla pueda avisar si una fuente no se pudo leer.
-    fuentes_derivadas: FUENTES_DERIVADAS.map((f) => f.categoria),
+    fuentes_derivadas: [...FUENTES_DERIVADAS.map((f) => f.categoria), 'compra_inventario'],
   };
 };
 

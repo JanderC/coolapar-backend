@@ -8,6 +8,7 @@ const { proteger, permitirRoles } = require('../../middlewares/auth.middleware')
 const validar = require('../../middlewares/validate.middleware');
 const nominaService = require('../../services/nomina.service');
 const cajaService = require('../../services/caja.service');
+const prestamosService = require('../../services/prestamos.service');
 
 const router = express.Router();
 
@@ -28,7 +29,25 @@ const conErroresDeNegocio = (manejador) =>
   });
 
 // ============================================================
-//  EMPLEADOS
+//  El modulo tiene TRES SECTORES que se manejan por separado:
+//
+//   1. EMPLEADOS Y NOMINA  -> sueldos, recibos y adelantos.
+//      Un ADELANTO se descuenta del proximo sueldo.
+//
+//   2. COMPRAS             -> lo que se le paga a proveedores.
+//      Las compras de insumos NO se cargan aqui: se leen del
+//      inventario, donde ya quedaron registradas con su precio.
+//
+//   3. PRESTAMOS           -> plata que se le presta a un empleado,
+//      a un productor o a un rutero. NO se descuenta de ningun
+//      sueldo ni de ninguna semana: la persona la va cancelando en
+//      abonos, y cada abono entra como ingreso.
+//
+//  El libro de caja los junta a todos para ver el movimiento real.
+// ============================================================
+
+// ============================================================
+//  SECTOR 1 — EMPLEADOS
 // ============================================================
 const listarEmpleados = asyncHandler(async (req, res) => {
   const where = {};
@@ -112,7 +131,7 @@ function normalizarEmpleado(body = {}) {
 }
 
 // ============================================================
-//  RECIBOS DE NOMINA
+//  SECTOR 1 — RECIBOS DE NOMINA
 // ============================================================
 const listarRecibos = asyncHandler(async (req, res) => {
   const where = {};
@@ -162,7 +181,7 @@ const anularRecibo = conErroresDeNegocio(async (req, res) => {
 });
 
 // ============================================================
-//  ADELANTOS
+//  SECTOR 1 — ADELANTOS (se descuentan del sueldo)
 // ============================================================
 const listarAdelantos = asyncHandler(async (req, res) => {
   const where = { categoria: 'adelanto' };
@@ -195,7 +214,90 @@ const crearAdelanto = conErroresDeNegocio(async (req, res) => {
 });
 
 // ============================================================
-//  LIBRO DE CAJA
+//  SECTOR 2 — COMPRAS
+// ============================================================
+const listarCompras = asyncHandler(async (req, res) => {
+  // Se piden al libro solo las categorias de compra. Las de inventario
+  // vienen derivadas y salen marcadas como no editables.
+  const libro = await cajaService.libro({
+    fecha_inicio: req.query.fecha_inicio,
+    fecha_fin: req.query.fecha_fin,
+    moneda: req.query.moneda,
+  });
+
+  const CATEGORIAS_COMPRA = ['compra', 'compra_insumo', 'compra_inventario', 'servicio'];
+  const compras = libro.movimientos.filter((m) => CATEGORIAS_COMPRA.includes(m.categoria));
+
+  const porMoneda = new Map();
+  compras
+    .filter((c) => !c.anulado)
+    .forEach((c) => {
+      porMoneda.set(c.moneda, Number(((porMoneda.get(c.moneda) || 0) + c.monto).toFixed(2)));
+    });
+
+  res.json({
+    success: true,
+    data: {
+      rango: libro.rango,
+      compras,
+      totales_por_moneda: [...porMoneda.entries()]
+        .map(([moneda, total]) => ({ moneda, total }))
+        .sort((a, b) => a.moneda.localeCompare(b.moneda)),
+    },
+  });
+});
+
+const crearCompra = conErroresDeNegocio(async (req, res) => {
+  const movimiento = await cajaService.registrarMovimiento({
+    ...req.body,
+    tipo: 'egreso',
+    categoria: req.body.categoria || 'compra',
+  });
+  res.status(201).json({ success: true, message: 'Compra registrada.', data: movimiento });
+});
+
+// ============================================================
+//  SECTOR 3 — PRESTAMOS (no se descuentan del sueldo)
+// ============================================================
+const listarPrestamos = asyncHandler(async (req, res) => {
+  const prestamos = await prestamosService.listar(req.query);
+  res.json({ success: true, data: prestamos });
+});
+
+const obtenerPrestamo = conErroresDeNegocio(async (req, res) => {
+  const prestamo = await prestamosService.obtener(req.params.id);
+  res.json({ success: true, data: prestamo });
+});
+
+const crearPrestamo = conErroresDeNegocio(async (req, res) => {
+  const prestamo = await prestamosService.crear(req.body);
+  res.status(201).json({
+    success: true,
+    message: 'Préstamo entregado. Se cobra por abonos, no se descuenta del sueldo.',
+    data: prestamo,
+  });
+});
+
+const abonarPrestamo = conErroresDeNegocio(async (req, res) => {
+  const { saldo } = await prestamosService.registrarAbono(req.params.id, req.body);
+  res.status(201).json({
+    success: true,
+    message: saldo <= 0.004 ? 'Abono registrado. El préstamo quedó cancelado.' : `Abono registrado. Quedan ${saldo}.`,
+    data: { saldo },
+  });
+});
+
+const anularPrestamo = conErroresDeNegocio(async (req, res) => {
+  await prestamosService.anular(req.params.id, req.body?.motivo);
+  res.json({ success: true, message: 'Préstamo anulado.' });
+});
+
+const saldosPrestamos = asyncHandler(async (req, res) => {
+  res.json({ success: true, data: await prestamosService.saldosPorBeneficiario() });
+});
+
+// ============================================================
+//  LIBRO DE CAJA (junta los tres sectores)
 // ============================================================
 const verLibro = asyncHandler(async (req, res) => {
   const datos = await cajaService.libro({
@@ -251,6 +353,19 @@ const reglasAdelanto = [
   body('moneda').optional({ nullable: true }).customSanitizer((v) => (v ? String(v).toUpperCase() : v)).isIn(MONEDAS),
 ];
 
+const reglasPrestamo = [
+  body('beneficiario_tipo').isIn(['empleado', 'productor', 'rutero', 'otro']).withMessage('Indique a quién se le presta'),
+  body('monto').custom((v) => !Number.isNaN(Number(v)) && Number(v) > 0).withMessage('El monto debe ser mayor a 0'),
+  body('fecha').optional({ nullable: true }).isISO8601().withMessage('Fecha inválida'),
+  body('moneda').optional({ nullable: true }).customSanitizer((v) => (v ? String(v).toUpperCase() : v)).isIn(MONEDAS),
+  body('motivo').optional({ nullable: true }).isLength({ max: 255 }).withMessage('Motivo demasiado largo'),
+];
+
+const reglasAbono = [
+  body('monto').custom((v) => !Number.isNaN(Number(v)) && Number(v) > 0).withMessage('El monto debe ser mayor a 0'),
+  body('fecha').optional({ nullable: true }).isISO8601().withMessage('Fecha inválida'),
+];
+
 const reglasMovimiento = [
   body('tipo').isIn(['ingreso', 'egreso']).withMessage('El tipo debe ser ingreso o egreso'),
   body('categoria').trim().notEmpty().withMessage('Elija la categoría'),
@@ -284,6 +399,24 @@ router.delete('/recibos/:id', permitirRoles('admin', 'contabilidad'), [param('id
 // Adelantos
 router.get('/adelantos', listarAdelantos);
 router.post('/adelantos', permitirRoles('admin', 'contabilidad'), reglasAdelanto, validar, crearAdelanto);
+
+// Sector 2 — Compras
+router.get('/compras', listarCompras);
+router.post('/compras', permitirRoles('admin', 'contabilidad'), reglasMovimiento, validar, crearCompra);
+
+// Sector 3 — Préstamos
+router.get('/prestamos', listarPrestamos);
+router.get('/prestamos/saldos', saldosPrestamos);
+router.get('/prestamos/:id', [param('id').isInt()], validar, obtenerPrestamo);
+router.post('/prestamos', permitirRoles('admin', 'contabilidad'), reglasPrestamo, validar, crearPrestamo);
+router.post(
+  '/prestamos/:id/abonos',
+  permitirRoles('admin', 'contabilidad'),
+  [param('id').isInt(), ...reglasAbono],
+  validar,
+  abonarPrestamo
+);
+router.delete('/prestamos/:id', permitirRoles('admin'), [param('id').isInt()], validar, anularPrestamo);
 
 // Libro de caja
 router.get(
