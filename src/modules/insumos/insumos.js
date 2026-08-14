@@ -316,8 +316,13 @@ const reglasMovimiento = [
     .customSanitizer((v) => (v === '' ? null : v))
     .custom((v) => v === null || (!Number.isNaN(Number(v)) && Number(v) >= 0))
     .withMessage('El precio unitario debe ser un número mayor o igual a 0'),
+  // Una carga inicial o un ajuste entran sin precio: no hay factura.
+  body('es_ajuste').optional({ nullable: true }).isBoolean().withMessage('es_ajuste debe ser verdadero o falso'),
   body('precio_unitario').custom((v, { req }) => {
-    if (req.body.tipo === 'entrada' && vacio(v)) throw new Error('Las entradas necesitan un precio unitario.');
+    const esAjuste = req.body.es_ajuste === true || req.body.es_ajuste === 'true';
+    if (req.body.tipo === 'entrada' && !esAjuste && vacio(v)) {
+      throw new Error('Las compras necesitan un precio unitario.');
+    }
     return true;
   }),
   body('moneda')
@@ -326,7 +331,10 @@ const reglasMovimiento = [
     .isIn(MONEDAS)
     .withMessage(`Moneda inválida. Use: ${MONEDAS.join(', ')}`),
   body('moneda').custom((v, { req }) => {
-    if (req.body.tipo === 'entrada' && vacio(v)) throw new Error('Las entradas necesitan la moneda en la que se pagó.');
+    const esAjuste = req.body.es_ajuste === true || req.body.es_ajuste === 'true';
+    if (req.body.tipo === 'entrada' && !esAjuste && vacio(v)) {
+      throw new Error('Las compras necesitan la moneda en la que se pagó.');
+    }
     return true;
   }),
   body('fecha').optional({ nullable: true }).isISO8601().withMessage('Fecha inválida'),

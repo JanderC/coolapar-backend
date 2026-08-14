@@ -37,8 +37,18 @@ const registrarMovimiento = async (insumoId, datos) => {
       throw new ErrorDeNegocio('La cantidad debe ser un número mayor a 0.');
     }
 
-    if (tipo === 'entrada' && (vacio(datos.precio_unitario) || vacio(datos.moneda))) {
-      throw new ErrorDeNegocio('Las entradas necesitan precio unitario y moneda.');
+    // Una COMPRA necesita precio y moneda: sin eso no se puede saber
+    // cuanto se gasto en insumos.
+    //
+    // Un AJUSTE no: es la carga inicial del deposito o una correccion
+    // contra un conteo fisico, y ahi no hay factura que valga. Se
+    // distinguen por el precio: los movimientos sin precio no cuentan
+    // como compras en el libro de caja (ver caja.service.js, que filtra
+    // por precio_unitario distinto de null).
+    const esAjuste = datos.es_ajuste === true || datos.es_ajuste === 'true';
+
+    if (tipo === 'entrada' && !esAjuste && (vacio(datos.precio_unitario) || vacio(datos.moneda))) {
+      throw new ErrorDeNegocio('Las compras necesitan precio unitario y moneda. Si es una carga inicial o un ajuste, márquelo como tal.');
     }
 
     const stockActual = Number(insumo.stock_actual);
@@ -58,8 +68,10 @@ const registrarMovimiento = async (insumoId, datos) => {
         insumo_id: insumo.id,
         tipo,
         cantidad,
-        precio_unitario: vacio(datos.precio_unitario) ? null : Number(datos.precio_unitario),
-        moneda: vacio(datos.moneda) ? null : String(datos.moneda).toUpperCase(),
+        // En un ajuste el precio se descarta aunque venga: lo que define
+        // a una compra es tener precio, y un ajuste no lo es.
+        precio_unitario: esAjuste || vacio(datos.precio_unitario) ? null : Number(datos.precio_unitario),
+        moneda: esAjuste || vacio(datos.moneda) ? null : String(datos.moneda).toUpperCase(),
         fecha: datos.fecha || undefined,
         descripcion: vacio(datos.descripcion) ? null : String(datos.descripcion).trim(),
         stock_resultante: stockResultante,
