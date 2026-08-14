@@ -876,6 +876,113 @@ const eliminarSemana = asyncHandler(async (req, res) => {
 //  armar la tabla dia por dia), sus precios y su total a pagar.
 // ============================================================
 
+// ============================================================
+//  ULTIMA SEMANA CARGADA
+//
+//  Responde "¿en que quedamos?". El operador no siempre recuerda cual
+//  fue la ultima semana que cargo ni a quienes alcanzo a meterle los
+//  litros, y sin eso termina repitiendo trabajo o saltandose gente.
+// ============================================================
+
+// @desc  La semana mas reciente con litros cargados y quienes la componen.
+// @route GET /api/registros-leche/ultima-semana
+const ultimaSemanaCargada = asyncHandler(async (req, res) => {
+  // Se busca el ultimo registro con leche, no la ultima semana creada:
+  // una semana puede haberse abierto y quedado vacia, y esa no cuenta
+  // como "cargada".
+  const ultimo = await RegistroLecheProductor.findOne({
+    where: {
+      [Op.or]: [
+        { litros: { [Op.gt]: 0 } },
+        { litros_acidos: { [Op.gt]: 0 } },
+        { litros_bajo_grasa: { [Op.gt]: 0 } },
+      ],
+    },
+    order: [
+      ['fecha', 'DESC'],
+      ['id', 'DESC'],
+    ],
+  });
+
+  if (!ultimo) {
+    return res.json({ success: true, data: null });
+  }
+
+  // La semana a la que pertenece ese registro marca el punto de partida.
+  let fechaInicio = null;
+  let fechaFin = null;
+
+  if (ultimo.semana_id) {
+    const semana = await SemanaPago.findByPk(ultimo.semana_id);
+    if (semana) {
+      fechaInicio = aTexto(semana.fecha_inicio);
+      fechaFin = aTexto(semana.fecha_fin);
+    }
+  }
+
+  // Registro suelto, sin semana guardada: se arma una semana de siete
+  // dias terminando en su fecha, para al menos dar un punto de partida.
+  if (!fechaInicio) {
+    fechaFin = aTexto(ultimo.fecha);
+    fechaInicio = sumarDias(fechaFin, -6);
+  }
+
+  // Todas las semanas que arrancan ese mismo dia: son las que va a traer
+  // la consulta, con el mismo criterio que resumen-semana.
+  const semanas = await SemanaPago.findAll({
+    where: { productor_id: { [Op.ne]: null }, fecha_inicio: fechaInicio },
+    attributes: ['id', 'productor_id', 'fecha_inicio', 'fecha_fin', 'estado'],
+  });
+
+  // El cierre mas tardio manda: unos cierran viernes y otros domingo.
+  semanas.forEach((s) => {
+    const fin = aTexto(s.fecha_fin);
+    if (!fechaFin || fin > fechaFin) fechaFin = fin;
+  });
+
+  const idsSemanas = semanas.map((s) => s.id);
+
+  const registros = idsSemanas.length
+    ? await RegistroLecheProductor.findAll({
+        where: { semana_id: idsSemanas },
+        include: [incluirProductor],
+      })
+    : [];
+
+  // Quienes quedaron cargados en esa semana, con cuanto trajo cada uno.
+  const porProductor = new Map();
+  registros.forEach((r) => {
+    const litros = aNumero(r.litros, 0) + aNumero(r.litros_acidos, 0) + aNumero(r.litros_bajo_grasa, 0);
+    if (litros <= 0) return;
+    const id = Number(r.productor_id);
+    const previo = porProductor.get(id) || { productor_id: id, nombre: r.Productor?.nombre || `Productor ${id}`, total_litros: 0, dias: 0 };
+    previo.total_litros = redondear(previo.total_litros + litros);
+    previo.dias += 1;
+    porProductor.set(id, previo);
+  });
+
+  const productores = [...porProductor.values()].sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+
+  // Los que abrieron semana pero todavia no tienen un solo litro: son
+  // justo los que se suelen quedar en el tintero.
+  const sinCargar = semanas
+    .filter((s) => !porProductor.has(Number(s.productor_id)))
+    .map((s) => Number(s.productor_id));
+
+  res.json({
+    success: true,
+    data: {
+      fecha_inicio: fechaInicio,
+      fecha_fin: fechaFin,
+      ultima_fecha_con_leche: aTexto(ultimo.fecha),
+      productores,
+      cantidad_productores: productores.length,
+      productores_sin_cargar: sinCargar.length,
+      semanas: semanas.length,
+    },
+  });
+});
+
 // Tope de seguridad: sin esto, un rango de dos anios traeria decenas de
 // miles de filas a memoria para agruparlas en JS.
 const MAX_DIAS_RESUMEN = 92;
@@ -1301,6 +1408,9 @@ router.delete(
 );
 
 // Resumen de la semana: todos los productores de un rango de fechas.
+// Punto de partida: en que semana se quedo el operador.
+router.get('/ultima-semana', ultimaSemanaCargada);
+
 router.get(
   '/resumen-semana',
   [
