@@ -860,9 +860,17 @@ const eliminarSemana = asyncHandler(async (req, res) => {
 //  Solo lectura: no crea ni modifica semanas_pago.
 //
 //  A diferencia de /hoja (que va de a un productor), aqui se parte del
-//  rango de fechas y se agrupan los registros que caen dentro. Un
-//  productor aparece si dejo al menos un litro en ese rango, sin importar
-//  como tenga configurada su propia semana.
+//  rango de fechas.
+//
+//  CRITERIO: aparecen los productores cuya SEMANA EMPIEZA el dia que se
+//  consulta. No basta con que hayan dejado leche esos dias.
+//
+//  Ejemplo: al consultar desde el 10 de agosto, un productor cuya semana
+//  arranca el 11 NO sale, aunque haya entregado leche el 12. Su semana es
+//  otra y mezclarlas descuadra el pago.
+//
+//  Con ?coincidir_inicio=cualquiera se vuelve al criterio viejo (todo el
+//  que haya dejado leche en el rango), util para revisar un mes suelto.
 //
 //  Devuelve, por cada productor: el litraje de CADA dia del rango (para
 //  armar la tabla dia por dia), sus precios y su total a pagar.
@@ -893,14 +901,54 @@ const resumenSemana = asyncHandler(async (req, res) => {
     });
   }
 
+  // Por defecto solo cuentan las semanas que ARRANCAN el dia consultado.
+  const exigirInicioExacto = req.query.coincidir_inicio !== 'cualquiera';
+
+  const where = { fecha: { [Op.between]: [desde, hasta] } };
+  let semanasDelRango = [];
+
+  if (exigirInicioExacto) {
+    semanasDelRango = await SemanaPago.findAll({
+      where: { productor_id: { [Op.ne]: null }, fecha_inicio: desde },
+      attributes: ['id', 'productor_id', 'fecha_inicio', 'fecha_fin', 'estado'],
+    });
+
+    // Nadie empieza semana ese dia: no hay nada que mostrar. Se responde
+    // vacio en vez de caer al criterio viejo, que traeria justo a los
+    // productores que no corresponden.
+    if (semanasDelRango.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          rango: { fecha_inicio: desde, fecha_fin: hasta, dias: fechas.length, columnas: fechas.map((f) => ({ fecha: f, dia: nombreDia(f) })) },
+          productores: [],
+          totales_por_dia: [],
+          totales_por_moneda: [],
+          totales: { productores: 0, total_litros: 0, total_litros_acidos: 0, total_litros_bajo_grasa: 0 },
+          criterio: 'inicio_exacto',
+          aviso: `Ningún productor tiene una semana que empiece el ${desde}.`,
+        },
+      });
+    }
+
+    // Solo los registros que pertenecen a esas semanas. Asi, si un
+    // productor entrego leche esos dias pero dentro de OTRA semana, sus
+    // litros no se cuelan en este resumen.
+    where.semana_id = semanasDelRango.map((s) => s.id);
+  }
+
   const registros = await RegistroLecheProductor.findAll({
-    where: { fecha: { [Op.between]: [desde, hasta] } },
+    where,
     include: [incluirProductor],
     order: [
       ['productor_id', 'ASC'],
       ['fecha', 'ASC'],
     ],
   });
+
+  // Para mostrar hasta cuando va la semana de cada quien: dos productores
+  // pueden arrancar el mismo dia y cerrar en dias distintos.
+  const semanaPorProductor = new Map(semanasDelRango.map((s) => [Number(s.productor_id), s]));
 
   // ---- Agrupar por productor ----
   const porProductor = new Map();
@@ -1013,11 +1061,17 @@ const resumenSemana = asyncHandler(async (req, res) => {
           }
       );
 
+      const semanaPropia = semanaPorProductor.get(f.productor_id) || null;
+
       return {
         productor_id: f.productor_id,
         nombre: f.nombre,
         color_identificativo: f.color_identificativo,
         moneda: f.moneda,
+        // Cuando arranca y cuando cierra SU semana. Dos productores
+        // pueden empezar el mismo dia y terminar en dias distintos.
+        semana_fecha_inicio: semanaPropia ? semanaPropia.fecha_inicio : null,
+        semana_fecha_fin: semanaPropia ? semanaPropia.fecha_fin : null,
         // Aviso para la pantalla: este productor cambio de moneda a mitad
         // del rango, asi que su total no se puede leer de corrido.
         monedas_mezcladas: f.monedas.size > 1,
@@ -1117,6 +1171,7 @@ const resumenSemana = asyncHandler(async (req, res) => {
         dias: fechas.length,
         columnas,
       },
+      criterio: exigirInicioExacto ? 'inicio_exacto' : 'cualquiera',
       productores,
       totales_por_dia: totalesPorDia,
       totales_por_moneda: totalesPorMoneda,
