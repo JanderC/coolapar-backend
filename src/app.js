@@ -13,6 +13,7 @@ const insumosRoutes = require('./modules/insumos/insumos');
 const produccionRoutes = require('./modules/produccion/produccion');
 const cuartoFrioRoutes = require('./modules/cuartoFrio/cuartoFrio');
 const nominaRoutes = require('./modules/nomina/nomina');
+const equiposRoutes = require('./modules/equipos/equipos');
 
 const app = express();
 
@@ -45,6 +46,7 @@ app.use('/api/insumos', insumosRoutes);
 app.use('/api/produccion', produccionRoutes);
 app.use('/api/cuarto-frio', cuartoFrioRoutes);
 app.use('/api/nomina', nominaRoutes);
+app.use('/api/equipos', equiposRoutes);
 
 // Manejo de rutas no encontradas y errores
 app.use(notFound);

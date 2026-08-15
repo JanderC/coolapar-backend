@@ -19,6 +19,7 @@ const MovimientoCaja = require('./movimientoCaja.model')(sequelize, DataTypes);
 const Prestamo = require('./prestamo.model')(sequelize, DataTypes);
 // SOLO PRUEBAS: descuentos manuales de leche. Quitar en producción.
 const AjusteLeche = require('./ajusteLeche.model')(sequelize, DataTypes);
+const Equipo = require('./equipo.model')(sequelize, DataTypes);
 
 const db = {
   sequelize,
@@ -40,8 +41,11 @@ const db = {
   MovimientoCaja,
   Prestamo,
   AjusteLeche,
+  Equipo,
 };
 
+// Relaciones que ya vienen definidas dentro de cada model
+// (Productor, Transportador, RegistroLecheProductor, RegistroLecheRutero, PagoRutero).
 Object.values(db).forEach((modelo) => {
   if (modelo && typeof modelo.associate === 'function') {
     modelo.associate(db);
