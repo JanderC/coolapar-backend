@@ -4,6 +4,8 @@ const { Op } = require('sequelize');
 
 const db = require('../../models');
 const { Insumo, MovimientoInsumo, RegistroLecheProductor, LoteProduccion } = db;
+// SOLO PRUEBAS. Si el modelo no esta registrado, todo sigue igual.
+const AjusteLeche = db.AjusteLeche || null;
 const asyncHandler = require('../../utils/asyncHandler');
 const { proteger, permitirRoles } = require('../../middlewares/auth.middleware');
 const validar = require('../../middlewares/validate.middleware');
@@ -172,6 +174,47 @@ const resumenInventario = asyncHandler(async (req, res) => {
     ? redondear2(await sumar(LoteProduccion, 'litros_utilizados', { activo: true, ...enRango }))
     : null;
 
+  // ---- SOLO PRUEBAS: ajustes manuales de leche ----
+  // Restan de lo mostrado en inventario sin tocar el registro diario.
+  // Al arrancar en produccion se borra este bloque y la tabla.
+  let ajustes = [];
+  if (AjusteLeche) {
+    try {
+      ajustes = await AjusteLeche.findAll({ order: [['fecha', 'DESC'], ['id', 'DESC']] });
+    } catch {
+      ajustes = []; // la tabla ya no existe: no se descuenta nada
+    }
+  }
+
+  const descontado = { buenos: 0, acidos: 0, bajo_grasa: 0 };
+  ajustes.forEach((a) => {
+    const litros = Number(a.litros) || 0;
+    if (a.tipo === 'todos') {
+      // Se reparte empezando por los buenos, que es de donde de verdad
+      // se consume: lo que no alcance pasa a los otros dos.
+      let resto = litros;
+      ['buenos', 'acidos', 'bajo_grasa'].forEach((clave) => {
+        const disponible = (tipos.find((x) => x.clave === clave)?.recibido_total || 0) - descontado[clave];
+        const quitar = Math.max(0, Math.min(resto, disponible));
+        descontado[clave] += quitar;
+        resto -= quitar;
+      });
+    } else if (descontado[a.tipo] !== undefined) {
+      descontado[a.tipo] += litros;
+    }
+  });
+
+  tipos.forEach((t) => {
+    const quitado = redondear2(descontado[t.clave] || 0);
+    t.descontado = quitado;
+    t.recibido_total = redondear2(Math.max(0, t.recibido_total - quitado));
+    if (t.recibido_rango !== null) {
+      t.recibido_rango = redondear2(Math.max(0, t.recibido_rango - quitado));
+    }
+  });
+
+  const totalDescontado = redondear2(Object.values(descontado).reduce((s, n) => s + n, 0));
+
   const recibidoTotal = redondear2(tipos.reduce((s, t) => s + t.recibido_total, 0));
   const recibidoRango = hayRango ? redondear2(tipos.reduce((s, t) => s + (t.recibido_rango || 0), 0)) : null;
 
@@ -192,6 +235,9 @@ const resumenInventario = asyncHandler(async (req, res) => {
         usada_produccion_total: usadaTotal,
         disponible_total: redondear2(recibidoTotal - usadaTotal),
         ultima_carga: ultimo ? ultimo.fecha : null,
+        // SOLO PRUEBAS
+        litros_descontados: totalDescontado,
+        ajustes_activos: ajustes.length,
       },
       insumos,
       unidades: UNIDADES,
@@ -280,6 +326,74 @@ const anularMovimiento = asyncHandler(async (req, res) => {
   }
 });
 
+// ============================================================
+//  SOLO PRUEBAS — quitar al arrancar en produccion
+//
+//  Baja los litros que muestra el inventario sin tocar el registro
+//  diario: las hojas de los productores, sus semanas y sus pagos
+//  quedan exactamente igual.
+//
+//  Para eliminarlo: borrar este bloque, sus dos rutas, la linea de
+//  AjusteLeche en models/index.js y ejecutar
+//  DROP TABLE IF EXISTS ajustes_leche;
+// ============================================================
+const descontarLeche = asyncHandler(async (req, res) => {
+  if (!AjusteLeche) {
+    return res.status(400).json({ success: false, message: 'Los ajustes de prueba no están habilitados.' });
+  }
+
+  const dejarEnCero = req.body.dejar_en_cero === true || req.body.dejar_en_cero === 'true';
+  const tipo = String(req.body.tipo || 'todos');
+
+  if (dejarEnCero) {
+    // Se descuenta exactamente lo que hay ahora, para que quede en cero.
+    const columnas = { buenos: 'litros', acidos: 'litros_acidos', bajo_grasa: 'litros_bajo_grasa' };
+    const creados = [];
+
+    for (const [clave, columna] of Object.entries(columnas)) {
+      const recibido = redondear2(await sumar(RegistroLecheProductor, columna, null));
+      const yaDescontado = redondear2(
+        (await AjusteLeche.sum('litros', { where: { tipo: clave } })) || 0
+      );
+      const pendiente = redondear2(recibido - yaDescontado);
+      if (pendiente > 0) {
+        creados.push(
+          await AjusteLeche.create({ tipo: clave, litros: pendiente, motivo: 'Dejar en cero (pruebas)' })
+        );
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: creados.length ? 'La leche quedó en cero.' : 'La leche ya estaba en cero.',
+      data: { ajustes: creados.length },
+    });
+  }
+
+  const litros = Number(req.body.litros);
+  if (Number.isNaN(litros) || litros <= 0) {
+    return res.status(400).json({ success: false, message: 'Indique cuántos litros quitar.' });
+  }
+
+  const ajuste = await AjusteLeche.create({
+    tipo,
+    litros: redondear2(litros),
+    fecha: req.body.fecha || undefined,
+    motivo: vacio(req.body.motivo) ? 'Ajuste de pruebas' : String(req.body.motivo).trim(),
+  });
+
+  res.status(201).json({ success: true, message: `Se descontaron ${litros} L.`, data: ajuste });
+});
+
+/** Deshace todos los descuentos: la leche vuelve a lo realmente cargado. */
+const restaurarLeche = asyncHandler(async (req, res) => {
+  if (!AjusteLeche) {
+    return res.status(400).json({ success: false, message: 'Los ajustes de prueba no están habilitados.' });
+  }
+  const borrados = await AjusteLeche.destroy({ where: {}, truncate: false });
+  res.json({ success: true, message: `Se deshicieron ${borrados} descuento(s).`, data: { borrados } });
+});
+
 // ---------- Reglas de validación ----------
 const reglasInsumo = (esCreacion) => [
   esCreacion
@@ -354,6 +468,10 @@ router.get(
   resumenInventario
 );
 router.get('/:id', [param('id').isInt().withMessage('Id inválido')], validar, obtener);
+// SOLO PRUEBAS: descontar y restaurar la leche del inventario.
+router.post('/leche/descontar', permitirRoles('admin', 'contabilidad'), descontarLeche);
+router.delete('/leche/descontar', permitirRoles('admin', 'contabilidad'), restaurarLeche);
+
 router.post('/', reglasInsumo(true), validar, crear);
 router.put('/:id', [param('id').isInt().withMessage('Id inválido'), ...reglasInsumo(false)], validar, actualizar);
 router.delete('/:id', permitirRoles('admin'), [param('id').isInt()], validar, eliminar);

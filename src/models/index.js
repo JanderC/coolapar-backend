@@ -17,6 +17,8 @@ const Empleado = require('./empleado.model')(sequelize, DataTypes);
 const PagoNomina = require('./pagoNomina.model')(sequelize, DataTypes);
 const MovimientoCaja = require('./movimientoCaja.model')(sequelize, DataTypes);
 const Prestamo = require('./prestamo.model')(sequelize, DataTypes);
+// SOLO PRUEBAS: descuentos manuales de leche. Quitar en producción.
+const AjusteLeche = require('./ajusteLeche.model')(sequelize, DataTypes);
 
 const db = {
   sequelize,
@@ -37,6 +39,7 @@ const db = {
   PagoNomina,
   MovimientoCaja,
   Prestamo,
+  AjusteLeche,
 };
 
 Object.values(db).forEach((modelo) => {
