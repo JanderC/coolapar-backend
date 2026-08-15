@@ -366,6 +366,17 @@ const reglasAbono = [
   body('fecha').optional({ nullable: true }).isISO8601().withMessage('Fecha inválida'),
 ];
 
+// Una compra SIEMPRE es un egreso: el tipo lo pone el handler, no viene
+// del formulario. Por eso lleva reglas propias, sin la validación de
+// 'tipo' que sí necesita el libro de caja.
+const reglasCompra = [
+  body('categoria').optional({ nullable: true }).trim().notEmpty().withMessage('Elija la categoría'),
+  body('concepto').trim().notEmpty().withMessage('Escriba qué se compró'),
+  body('monto').custom((v) => !Number.isNaN(Number(v)) && Number(v) > 0).withMessage('El monto debe ser mayor a 0'),
+  body('fecha').optional({ nullable: true }).isISO8601().withMessage('Fecha inválida'),
+  body('moneda').optional({ nullable: true }).customSanitizer((v) => (v ? String(v).toUpperCase() : v)).isIn(MONEDAS),
+];
+
 const reglasMovimiento = [
   body('tipo').isIn(['ingreso', 'egreso']).withMessage('El tipo debe ser ingreso o egreso'),
   body('categoria').trim().notEmpty().withMessage('Elija la categoría'),
@@ -402,7 +413,7 @@ router.post('/adelantos', permitirRoles('admin', 'contabilidad'), reglasAdelanto
 
 // Sector 2 — Compras
 router.get('/compras', listarCompras);
-router.post('/compras', permitirRoles('admin', 'contabilidad'), reglasMovimiento, validar, crearCompra);
+router.post('/compras', permitirRoles('admin', 'contabilidad'), reglasCompra, validar, crearCompra);
 
 // Sector 3 — Préstamos
 router.get('/prestamos', listarPrestamos);
