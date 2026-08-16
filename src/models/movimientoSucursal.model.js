@@ -38,6 +38,11 @@ module.exports = (sequelize, DataTypes) => {
       },
       piezas: { type: DataTypes.INTEGER, allowNull: true },
 
+      // Para agrupar: "De la planta", "Víveres", "Bebidas"... Las
+      // sucursales venden mucho más que queso, y sin esto el inventario
+      // se vuelve una lista larga y plana.
+      categoria: { type: DataTypes.STRING(60), allowNull: true },
+
       venta_id: { type: DataTypes.INTEGER, allowNull: true },
       descripcion: { type: DataTypes.STRING(255), allowNull: true },
     },

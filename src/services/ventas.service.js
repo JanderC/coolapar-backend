@@ -103,6 +103,9 @@ const existenciaSucursal = async (sucursalId, transaction = null) => {
   const filas = await MovimientoSucursal.findAll({
     attributes: [
       'producto',
+      // MAX y no group by: si un producto quedó cargado con dos
+      // categorías distintas, se toma una y no se parte en dos filas.
+      [sequelize.literal('MAX(categoria)'), 'categoria'],
       [sequelize.literal('SUM(kilos * signo)'), 'kilos'],
       [sequelize.literal('SUM(COALESCE(piezas, 0) * signo)'), 'piezas'],
     ],
@@ -115,6 +118,7 @@ const existenciaSucursal = async (sucursalId, transaction = null) => {
   return filas
     .map((f) => ({
       producto: f.producto,
+      categoria: f.categoria || 'Sin categoría',
       kilos: redondearKg(f.kilos),
       piezas: Number(f.piezas) || 0,
     }))
@@ -266,6 +270,10 @@ const registrarVentaSucursal = async (datos, usuario) => {
       throw new ErrorDeNegocio(`No hay suficiente producto en la sucursal. ${faltantes.join('; ')}.`);
     }
 
+    // Para que la salida quede con la misma categoría con la que entró.
+    const existencias = await existenciaSucursal(sucursalId, transaction);
+    const categoriasActuales = new Map(existencias.map((p) => [p.producto, p.categoria]));
+
     const venta = await Venta.create(
       {
         fecha: datos.fecha || undefined,
@@ -295,6 +303,7 @@ const registrarVentaSucursal = async (datos, usuario) => {
           signo: -1,
           kilos: item.kilos,
           piezas: item.piezas,
+          categoria: categoriasActuales.get(item.producto) || null,
           venta_id: venta.id,
           descripcion: venta.cliente_nombre ? `Venta a ${venta.cliente_nombre}` : `Venta #${venta.id}`,
         },
@@ -396,6 +405,7 @@ const ingresarASucursal = async (venta, transaction, usarRecibido = false) => {
         signo: 1,
         kilos: redondearKg(kilos),
         piezas,
+        categoria: 'De la planta',
         venta_id: venta.id,
         descripcion: `Recibido del despacho #${venta.id}`,
       },
@@ -523,6 +533,7 @@ const ajustarInventarioSucursal = async (sucursalId, datos) => {
         signo: suma ? 1 : -1,
         kilos: redondearKg(kilos),
         piezas: aEntero(datos.piezas),
+        categoria: datos.categoria ? String(datos.categoria).trim() : null,
         descripcion: datos.motivo ? String(datos.motivo).trim() : 'Ajuste de inventario',
       },
       { transaction }
