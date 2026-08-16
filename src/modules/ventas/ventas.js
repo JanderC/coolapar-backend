@@ -195,16 +195,60 @@ const inventarioSucursal = asyncHandler(async (req, res) => {
 
   const productos = await ventasService.existenciaSucursal(sucursalId);
 
+  // No se suman las cantidades entre productos: 20 kg de harina y 5 L de
+  // aceite no son 25 de nada. Se cuenta cuántos productos hay con
+  // existencia y se agrupa por unidad.
+  const porUnidad = new Map();
+  productos
+    .filter((p) => p.cantidad > 0)
+    .forEach((p) => {
+      porUnidad.set(p.unidad_medida, Number(((porUnidad.get(p.unidad_medida) || 0) + p.cantidad).toFixed(3)));
+    });
+
   res.json({
     success: true,
     data: {
       productos,
+      unidades: ventasService.UNIDADES,
       totales: {
-        productos: productos.length,
-        kilos: Number(productos.reduce((s, p) => s + p.kilos, 0).toFixed(3)),
+        productos: productos.filter((p) => p.cantidad > 0).length,
+        en_catalogo: productos.length,
+        por_unidad: [...porUnidad.entries()].map(([unidad, total]) => ({ unidad, total })),
       },
     },
   });
+});
+
+// ---------- Catálogo de la sucursal ----------
+
+// @route GET /api/ventas/sucursal/productos
+const listarProductosSucursal = asyncHandler(async (req, res) => {
+  const sucursalId = req.sucursalFiltro !== null ? req.sucursalFiltro : Number(req.query.sucursal_id);
+  if (!sucursalId) return res.status(400).json({ success: false, message: 'Indique la sucursal.' });
+
+  res.json({
+    success: true,
+    data: await ventasService.listarCatalogo(sucursalId),
+    unidades: ventasService.UNIDADES,
+  });
+});
+
+// @route POST /api/ventas/sucursal/productos
+const crearProductoSucursal = conErroresDeNegocio(async (req, res) => {
+  const sucursalId = req.sucursalFiltro !== null ? req.sucursalFiltro : Number(req.body.sucursal_id);
+  if (!sucursalId) return res.status(400).json({ success: false, message: 'Indique la sucursal.' });
+
+  const producto = await ventasService.guardarProducto(sucursalId, req.body);
+  res.status(201).json({ success: true, message: 'Producto agregado al catálogo.', data: producto });
+});
+
+// @route PUT /api/ventas/sucursal/productos/:id
+const actualizarProductoSucursal = conErroresDeNegocio(async (req, res) => {
+  const sucursalId = req.sucursalFiltro !== null ? req.sucursalFiltro : Number(req.body.sucursal_id);
+  if (!sucursalId) return res.status(400).json({ success: false, message: 'Indique la sucursal.' });
+
+  const producto = await ventasService.guardarProducto(sucursalId, req.body, req.params.id);
+  res.json({ success: true, message: 'Producto actualizado.', data: producto });
 });
 
 /**
@@ -282,6 +326,9 @@ router.use(alcanceSucursal);
 
 // ---- Sucursal ----
 router.get('/sucursal/inventario', inventarioSucursal);
+router.get('/sucursal/productos', listarProductosSucursal);
+router.post('/sucursal/productos', crearProductoSucursal);
+router.put('/sucursal/productos/:id', [param('id').isInt()], validar, actualizarProductoSucursal);
 // Solo el personal de planta ve el inventario de todas.
 router.get('/sucursales/inventarios', permitirRoles('admin', 'contabilidad', 'operador'), inventariosDeTodas);
 router.post('/sucursal/ajuste', ajustarInventario);

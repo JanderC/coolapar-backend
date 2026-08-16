@@ -1,6 +1,6 @@
 const { Op } = require('sequelize');
 const db = require('../models');
-const { Venta, VentaItem, MovimientoSucursal, Sucursal, sequelize } = db;
+const { Venta, VentaItem, MovimientoSucursal, ProductoSucursal, Sucursal, sequelize } = db;
 const { ErrorDeNegocio } = require('./insumos.service');
 const cuartoFrioService = require('./cuartoFrio.service');
 
@@ -98,42 +98,77 @@ const segunUsuario = (venta, usuario) =>
 //  INVENTARIO DE LA SUCURSAL
 // ============================================================
 
-/** Existencia por producto de una sucursal: SUM(kilos * signo). */
+/**
+ * Existencia por producto: SUM(cantidad * signo).
+ *
+ * Se cruza con el catálogo para saber en qué se mide cada uno y a qué
+ * precio se vende. Un producto del catálogo sin movimientos aparece
+ * igual, en cero: hace falta para poder cargarlo y para armar la venta.
+ */
 const existenciaSucursal = async (sucursalId, transaction = null) => {
-  const filas = await MovimientoSucursal.findAll({
-    attributes: [
-      'producto',
-      // MAX y no group by: si un producto quedó cargado con dos
-      // categorías distintas, se toma una y no se parte en dos filas.
-      [sequelize.literal('MAX(categoria)'), 'categoria'],
-      [sequelize.literal('SUM(kilos * signo)'), 'kilos'],
-      [sequelize.literal('SUM(COALESCE(piezas, 0) * signo)'), 'piezas'],
-    ],
-    where: { sucursal_id: sucursalId },
-    group: ['producto'],
-    raw: true,
-    transaction,
+  const [filas, catalogo] = await Promise.all([
+    MovimientoSucursal.findAll({
+      attributes: [
+        'producto',
+        // MAX y no group by: si un producto quedó cargado con dos
+        // categorías distintas, se toma una y no se parte en dos filas.
+        [sequelize.literal('MAX(categoria)'), 'categoria'],
+        [sequelize.literal('MAX(unidad_medida)'), 'unidad_medida'],
+        [sequelize.literal('SUM(cantidad * signo)'), 'cantidad'],
+        [sequelize.literal('SUM(COALESCE(piezas, 0) * signo)'), 'piezas'],
+      ],
+      where: { sucursal_id: sucursalId },
+      group: ['producto'],
+      raw: true,
+      transaction,
+    }),
+    ProductoSucursal
+      ? ProductoSucursal.findAll({ where: { sucursal_id: sucursalId, activo: true }, transaction })
+      : [],
+  ]);
+
+  const porNombre = new Map(catalogo.map((p) => [p.nombre.toLowerCase(), p]));
+  const resultado = new Map();
+
+  filas.forEach((f) => {
+    const ficha = porNombre.get(String(f.producto).toLowerCase());
+    resultado.set(f.producto, {
+      producto: f.producto,
+      producto_id: ficha?.id || null,
+      categoria: ficha?.categoria || f.categoria || 'Sin categoría',
+      unidad_medida: ficha?.unidad_medida || f.unidad_medida || 'kg',
+      precio_venta: ficha?.precio_venta === null || ficha?.precio_venta === undefined ? null : Number(ficha.precio_venta),
+      cantidad: redondearKg(f.cantidad),
+      piezas: Number(f.piezas) || 0,
+    });
   });
 
-  return filas
-    .map((f) => ({
-      producto: f.producto,
-      categoria: f.categoria || 'Sin categoría',
-      kilos: redondearKg(f.kilos),
-      piezas: Number(f.piezas) || 0,
-    }))
-    .filter((p) => p.kilos > 0.0005 || p.piezas > 0)
-    .sort((a, b) => a.producto.localeCompare(b.producto, 'es'));
+  // Los del catálogo que todavía no tienen movimientos: en cero, pero
+  // visibles, porque si no no hay forma de cargarlos.
+  catalogo.forEach((p) => {
+    if (resultado.has(p.nombre)) return;
+    resultado.set(p.nombre, {
+      producto: p.nombre,
+      producto_id: p.id,
+      categoria: p.categoria || 'Sin categoría',
+      unidad_medida: p.unidad_medida,
+      precio_venta: p.precio_venta === null || p.precio_venta === undefined ? null : Number(p.precio_venta),
+      cantidad: 0,
+      piezas: 0,
+    });
+  });
+
+  return [...resultado.values()].sort((a, b) => a.producto.localeCompare(b.producto, 'es'));
 };
 
 const existenciaDeProducto = async (sucursalId, producto, transaction = null) => {
   const fila = await MovimientoSucursal.findAll({
-    attributes: [[sequelize.literal('SUM(kilos * signo)'), 'kilos']],
+    attributes: [[sequelize.literal('SUM(cantidad * signo)'), 'cantidad']],
     where: { sucursal_id: sucursalId, producto },
     raw: true,
     transaction,
   });
-  return redondearKg(fila?.[0]?.kilos);
+  return redondearKg(fila?.[0]?.cantidad);
 };
 
 // ============================================================
@@ -263,7 +298,8 @@ const registrarVentaSucursal = async (datos, usuario) => {
     for (const item of items) {
       const disponible = await existenciaDeProducto(sucursalId, item.producto, transaction);
       if (item.kilos > disponible + 0.0005) {
-        faltantes.push(`${item.producto}: se venden ${item.kilos} kg y hay ${disponible}`);
+        const unidad = unidadesActuales.get(item.producto) || 'kg';
+        faltantes.push(`${item.producto}: se venden ${item.kilos} ${unidad} y hay ${disponible}`);
       }
     }
     if (faltantes.length > 0) {
@@ -273,6 +309,7 @@ const registrarVentaSucursal = async (datos, usuario) => {
     // Para que la salida quede con la misma categoría con la que entró.
     const existencias = await existenciaSucursal(sucursalId, transaction);
     const categoriasActuales = new Map(existencias.map((p) => [p.producto, p.categoria]));
+    const unidadesActuales = new Map(existencias.map((p) => [p.producto, p.unidad_medida]));
 
     const venta = await Venta.create(
       {
@@ -301,7 +338,8 @@ const registrarVentaSucursal = async (datos, usuario) => {
           producto: item.producto,
           tipo: 'venta',
           signo: -1,
-          kilos: item.kilos,
+          cantidad: item.kilos,
+          unidad_medida: unidadesActuales.get(item.producto) || 'kg',
           piezas: item.piezas,
           categoria: categoriasActuales.get(item.producto) || null,
           venta_id: venta.id,
@@ -403,7 +441,9 @@ const ingresarASucursal = async (venta, transaction, usarRecibido = false) => {
         producto: item.producto,
         tipo: 'recepcion',
         signo: 1,
-        kilos: redondearKg(kilos),
+        // Lo que viene de la planta siempre es queso, y va en kilos.
+        cantidad: redondearKg(kilos),
+        unidad_medida: 'kg',
         piezas,
         categoria: 'De la planta',
         venta_id: venta.id,
@@ -514,11 +554,56 @@ const ajustarInventarioSucursal = async (sucursalId, datos) => {
   const sucursal = await Sucursal.findByPk(sucursalId);
   if (!sucursal) throw new ErrorDeNegocio('La sucursal no existe.');
 
+  // La unidad la manda el catálogo: si el producto ya existe se respeta
+  // la suya, porque mezclar kilos y litros del mismo producto haría que
+  // la suma no signifique nada.
+  const ficha = ProductoSucursal
+    ? await ProductoSucursal.findOne({
+        where: sequelize.where(sequelize.fn('lower', sequelize.col('nombre')), producto.toLowerCase()),
+      })
+    : null;
+
+  let unidad = ficha?.unidad_medida || null;
+  if (!unidad) {
+    unidad = ProductoSucursal.normalizarUnidad(datos.unidad_medida) || 'kg';
+  }
+  const categoria = ficha?.categoria || (datos.categoria ? String(datos.categoria).trim() : null);
+
   return sequelize.transaction(async (transaction) => {
     if (!suma) {
       const disponible = await existenciaDeProducto(sucursalId, producto, transaction);
       if (kilos > disponible + 0.0005) {
-        throw new ErrorDeNegocio(`No se puede quitar ${kilos} kg: de ${producto} solo hay ${disponible}.`);
+        throw new ErrorDeNegocio(
+          `No se puede quitar ${kilos} ${unidad}: de ${producto} solo hay ${disponible} ${unidad}.`
+        );
+      }
+    }
+
+    // Si es un producto nuevo, se da de alta en el catálogo con su
+    // unidad y su precio: así aparece después al armar la venta.
+    if (ProductoSucursal) {
+      if (ficha) {
+        const cambios = {};
+        if (datos.precio_venta !== undefined && datos.precio_venta !== null && datos.precio_venta !== '') {
+          cambios.precio_venta = Number(datos.precio_venta);
+        }
+        if (categoria && !ficha.categoria) cambios.categoria = categoria;
+        if (Object.keys(cambios).length > 0) await ficha.update(cambios, { transaction });
+      } else {
+        await ProductoSucursal.create(
+          {
+            sucursal_id: sucursalId,
+            nombre: producto,
+            categoria,
+            unidad_medida: unidad,
+            precio_venta:
+              datos.precio_venta === undefined || datos.precio_venta === null || datos.precio_venta === ''
+                ? null
+                : Number(datos.precio_venta),
+            moneda: sucursal.moneda || 'BS',
+          },
+          { transaction }
+        );
       }
     }
 
@@ -531,9 +616,10 @@ const ajustarInventarioSucursal = async (sucursalId, datos) => {
         // ajuste de conteo. Se pueden distinguir después en el historial.
         tipo: suma ? 'ajuste' : datos.tipo === 'merma' ? 'merma' : 'ajuste',
         signo: suma ? 1 : -1,
-        kilos: redondearKg(kilos),
+        cantidad: redondearKg(kilos),
+        unidad_medida: unidad,
         piezas: aEntero(datos.piezas),
-        categoria: datos.categoria ? String(datos.categoria).trim() : null,
+        categoria: categoria || null,
         descripcion: datos.motivo ? String(datos.motivo).trim() : 'Ajuste de inventario',
       },
       { transaction }
@@ -553,11 +639,83 @@ const inventarioDeTodas = async () => {
         productos,
         totales: {
           productos: productos.length,
-          kilos: redondearKg(productos.reduce((acc, p) => acc + p.kilos, 0)),
+          productos_con_existencia: productos.filter((p) => p.cantidad > 0).length,
         },
       };
     })
   );
+};
+
+/** Catálogo de productos de una sucursal. */
+const listarCatalogo = async (sucursalId) => {
+  if (!ProductoSucursal) return [];
+  return ProductoSucursal.findAll({
+    where: { sucursal_id: sucursalId },
+    order: [
+      ['activo', 'DESC'],
+      ['categoria', 'ASC'],
+      ['nombre', 'ASC'],
+    ],
+  });
+};
+
+/** Da de alta o corrige un producto del catálogo. */
+const guardarProducto = async (sucursalId, datos, productoId = null) => {
+  const nombre = String(datos.nombre || '').trim();
+  if (!nombre) throw new ErrorDeNegocio('Escriba el nombre del producto.');
+
+  const unidad = ProductoSucursal.normalizarUnidad(datos.unidad_medida);
+  if (!unidad) {
+    throw new ErrorDeNegocio(`Unidad no reconocida. Use: ${ProductoSucursal.UNIDADES.join(', ')}.`);
+  }
+
+  const sucursal = await Sucursal.findByPk(sucursalId);
+  if (!sucursal) throw new ErrorDeNegocio('La sucursal no existe.');
+
+  const campos = {
+    sucursal_id: sucursalId,
+    nombre,
+    categoria: datos.categoria ? String(datos.categoria).trim() : null,
+    unidad_medida: unidad,
+    precio_venta:
+      datos.precio_venta === undefined || datos.precio_venta === null || datos.precio_venta === ''
+        ? null
+        : Number(datos.precio_venta),
+    moneda: String(datos.moneda || sucursal.moneda || 'BS').toUpperCase(),
+  };
+  if (datos.activo !== undefined) campos.activo = datos.activo === true || datos.activo === 'true';
+
+  if (productoId) {
+    const ficha = await ProductoSucursal.findByPk(productoId);
+    if (!ficha) throw new ErrorDeNegocio('El producto no existe.');
+    if (Number(ficha.sucursal_id) !== Number(sucursalId)) {
+      throw new ErrorDeNegocio('Ese producto no es de su sucursal.');
+    }
+
+    // Cambiar la unidad con existencia cargada convertiría kilos en
+    // litros de un plumazo. Se bloquea en vez de descuadrar el conteo.
+    if (ficha.unidad_medida !== unidad) {
+      const existencia = await existenciaDeProducto(sucursalId, ficha.nombre);
+      if (existencia > 0.0005) {
+        throw new ErrorDeNegocio(
+          `No se puede cambiar la unidad de ${ficha.nombre}: hay ${existencia} ${ficha.unidad_medida} cargados. Déjelo en cero primero.`
+        );
+      }
+    }
+
+    await ficha.update(campos);
+    return ficha;
+  }
+
+  const repetido = await ProductoSucursal.findOne({
+    where: {
+      sucursal_id: sucursalId,
+      ...sequelize.where(sequelize.fn('lower', sequelize.col('nombre')), nombre.toLowerCase()),
+    },
+  });
+  if (repetido) throw new ErrorDeNegocio(`Ya existe «${repetido.nombre}» en el catálogo.`);
+
+  return ProductoSucursal.create(campos);
 };
 
 /** Anula una venta y deshace lo que movió. */
@@ -601,7 +759,8 @@ const anularVenta = async (ventaId, motivo) => {
             producto: mov.producto,
             tipo: 'recepcion',
             signo: -1,
-            kilos: mov.kilos,
+            cantidad: mov.cantidad,
+            unidad_medida: mov.unidad_medida,
             piezas: mov.piezas,
             venta_id: venta.id,
             descripcion: `Anulación del despacho #${venta.id}`,
@@ -619,7 +778,7 @@ const anularVenta = async (ventaId, motivo) => {
             producto: item.producto,
             tipo: 'venta',
             signo: 1,
-            kilos: Number(item.kilos),
+            cantidad: Number(item.kilos),
             piezas: item.piezas,
             venta_id: venta.id,
             descripcion: `Anulación de la venta #${venta.id}`,
@@ -651,5 +810,8 @@ module.exports = {
   anularVenta,
   ajustarInventarioSucursal,
   inventarioDeTodas,
+  listarCatalogo,
+  guardarProducto,
+  UNIDADES: ProductoSucursal ? ProductoSucursal.UNIDADES : [],
   TOLERANCIA_KG,
 };

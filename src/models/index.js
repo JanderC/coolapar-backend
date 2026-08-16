@@ -24,6 +24,7 @@ const Sucursal = require('./sucursal.model')(sequelize, DataTypes);
 const Venta = require('./venta.model')(sequelize, DataTypes);
 const VentaItem = require('./ventaItem.model')(sequelize, DataTypes);
 const MovimientoSucursal = require('./movimientoSucursal.model')(sequelize, DataTypes);
+const ProductoSucursal = require('./productoSucursal.model')(sequelize, DataTypes);
 
 const db = {
   sequelize,
@@ -50,6 +51,7 @@ const db = {
   Venta,
   VentaItem,
   MovimientoSucursal,
+  ProductoSucursal,
 };
 
 // Relaciones que ya vienen definidas dentro de cada model
