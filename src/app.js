@@ -17,6 +17,7 @@ const equiposRoutes = require('./modules/equipos/equipos');
 const sucursalesRoutes = require('./modules/sucursales/sucursales');
 const usuariosRoutes = require('./modules/usuarios/usuarios');
 const ventasRoutes = require('./modules/ventas/ventas');
+const reportesRoutes = require('./modules/reportes/reportes');
 
 const app = express();
 
@@ -53,6 +54,7 @@ app.use('/api/equipos', equiposRoutes);
 app.use('/api/sucursales', sucursalesRoutes);
 app.use('/api/usuarios', usuariosRoutes);
 app.use('/api/ventas', ventasRoutes);
+app.use('/api/reportes', reportesRoutes);
 
 // Manejo de rutas no encontradas y errores
 app.use(notFound);
