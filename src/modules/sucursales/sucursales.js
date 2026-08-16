@@ -48,7 +48,7 @@ const listar = asyncHandler(async (req, res) => {
   const sucursales = await Sucursal.findAll({
     where,
     include: puedeIncluirUsuarios
-      ? [{ model: db.Usuario, as: 'Usuarios', required: false, attributes: ['id', 'nombre', 'usuario', 'rol', 'activo'] }]
+      ? [{ model: db.Usuario, as: 'Usuarios', required: false, attributes: ['id', 'nombre', 'email', 'rol', 'activo'] }]
       : [],
     order: [['nombre', 'ASC']],
   });
