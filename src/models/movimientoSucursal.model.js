@@ -27,15 +27,21 @@ module.exports = (sequelize, DataTypes) => {
         },
       },
 
-      kilos: {
+      // Se llama cantidad y no kilos porque una sucursal mueve harina en
+      // kilos, aceite en litros y refrescos por unidad. La unidad la
+      // define el producto en su catálogo; aquí se copia para que el
+      // movimiento se siga entendiendo aunque el catálogo cambie.
+      cantidad: {
         type: DataTypes.DECIMAL(12, 3),
         allowNull: false,
         validate: {
           esPositivo(valor) {
-            if (Number(valor) <= 0) throw new Error('Los kilos deben ser mayores a 0.');
+            if (Number(valor) <= 0) throw new Error('La cantidad debe ser mayor a 0.');
           },
         },
       },
+      unidad_medida: { type: DataTypes.STRING(20), allowNull: false, defaultValue: 'kg' },
+
       piezas: { type: DataTypes.INTEGER, allowNull: true },
 
       // Para agrupar: "De la planta", "Víveres", "Bebidas"... Las
