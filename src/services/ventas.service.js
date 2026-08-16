@@ -138,6 +138,9 @@ const existenciaSucursal = async (sucursalId, transaction = null) => {
       categoria: ficha?.categoria || f.categoria || 'Sin categoría',
       unidad_medida: ficha?.unidad_medida || f.unidad_medida || 'kg',
       precio_venta: ficha?.precio_venta === null || ficha?.precio_venta === undefined ? null : Number(ficha.precio_venta),
+      // Cada producto tiene su moneda: un aceite importado puede estar
+      // en dólares y la harina en pesos, en la misma sucursal.
+      moneda: ficha?.moneda || null,
       cantidad: redondearKg(f.cantidad),
       piezas: Number(f.piezas) || 0,
     });
@@ -153,6 +156,7 @@ const existenciaSucursal = async (sucursalId, transaction = null) => {
       categoria: p.categoria || 'Sin categoría',
       unidad_medida: p.unidad_medida,
       precio_venta: p.precio_venta === null || p.precio_venta === undefined ? null : Number(p.precio_venta),
+      moneda: p.moneda,
       cantidad: 0,
       piezas: 0,
     });
@@ -586,6 +590,9 @@ const ajustarInventarioSucursal = async (sucursalId, datos) => {
         const cambios = {};
         if (datos.precio_venta !== undefined && datos.precio_venta !== null && datos.precio_venta !== '') {
           cambios.precio_venta = Number(datos.precio_venta);
+          // La moneda acompaña al precio: cambiar uno sin el otro
+          // convertiría 5000 COP en 5000 USD sin que nadie lo note.
+          if (datos.moneda) cambios.moneda = String(datos.moneda).toUpperCase();
         }
         if (categoria && !ficha.categoria) cambios.categoria = categoria;
         if (Object.keys(cambios).length > 0) await ficha.update(cambios, { transaction });
@@ -600,7 +607,7 @@ const ajustarInventarioSucursal = async (sucursalId, datos) => {
               datos.precio_venta === undefined || datos.precio_venta === null || datos.precio_venta === ''
                 ? null
                 : Number(datos.precio_venta),
-            moneda: sucursal.moneda || 'BS',
+            moneda: String(datos.moneda || sucursal.moneda || 'BS').toUpperCase(),
           },
           { transaction }
         );
