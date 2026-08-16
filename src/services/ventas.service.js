@@ -141,6 +141,7 @@ const existenciaSucursal = async (sucursalId, transaction = null) => {
       // Cada producto tiene su moneda: un aceite importado puede estar
       // en dólares y la harina en pesos, en la misma sucursal.
       moneda: ficha?.moneda || null,
+      codigo_barras: ficha?.codigo_barras || null,
       cantidad: redondearKg(f.cantidad),
       piezas: Number(f.piezas) || 0,
     });
@@ -157,6 +158,7 @@ const existenciaSucursal = async (sucursalId, transaction = null) => {
       unidad_medida: p.unidad_medida,
       precio_venta: p.precio_venta === null || p.precio_venta === undefined ? null : Number(p.precio_venta),
       moneda: p.moneda,
+      codigo_barras: p.codigo_barras || null,
       cantidad: 0,
       piezas: 0,
     });
@@ -595,6 +597,9 @@ const ajustarInventarioSucursal = async (sucursalId, datos) => {
           if (datos.moneda) cambios.moneda = String(datos.moneda).toUpperCase();
         }
         if (categoria && !ficha.categoria) cambios.categoria = categoria;
+        if (datos.codigo_barras !== undefined) {
+          cambios.codigo_barras = datos.codigo_barras ? String(datos.codigo_barras).trim() : null;
+        }
         if (Object.keys(cambios).length > 0) await ficha.update(cambios, { transaction });
       } else {
         await ProductoSucursal.create(
@@ -603,6 +608,7 @@ const ajustarInventarioSucursal = async (sucursalId, datos) => {
             nombre: producto,
             categoria,
             unidad_medida: unidad,
+            codigo_barras: datos.codigo_barras ? String(datos.codigo_barras).trim() : null,
             precio_venta:
               datos.precio_venta === undefined || datos.precio_venta === null || datos.precio_venta === ''
                 ? null
@@ -684,6 +690,7 @@ const guardarProducto = async (sucursalId, datos, productoId = null) => {
     nombre,
     categoria: datos.categoria ? String(datos.categoria).trim() : null,
     unidad_medida: unidad,
+    codigo_barras: datos.codigo_barras ? String(datos.codigo_barras).trim() : null,
     precio_venta:
       datos.precio_venta === undefined || datos.precio_venta === null || datos.precio_venta === ''
         ? null

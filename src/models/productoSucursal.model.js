@@ -45,6 +45,10 @@ module.exports = (sequelize, DataTypes) => {
 
       categoria: { type: DataTypes.STRING(60), allowNull: true },
 
+      // Opcional. Un producto sin código se busca por nombre; con
+      // código, el lector lo encuentra de una.
+      codigo_barras: { type: DataTypes.STRING(60), allowNull: true },
+
       // Se elige una vez: todo el movimiento de ese producto queda en
       // esta unidad. Cambiarla después no convierte lo ya cargado.
       unidad_medida: {
