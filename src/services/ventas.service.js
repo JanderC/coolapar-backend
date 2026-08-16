@@ -485,6 +485,70 @@ const resolverDiferencia = async (ventaId, resolucion, nota) => {
   });
 };
 
+/**
+ * La sucursal carga o corrige su inventario a mano.
+ *
+ * Hace falta porque no todo entra por un despacho: puede haber
+ * mercancía de antes de usar el sistema, o una diferencia contra el
+ * conteo físico. Queda como 'ajuste' o 'merma', separado de las
+ * recepciones, para que después se sepa de dónde salió cada kilo.
+ */
+const ajustarInventarioSucursal = async (sucursalId, datos) => {
+  const producto = String(datos.producto || '').trim();
+  const kilos = Number(datos.kilos);
+  const suma = datos.suma === true || datos.suma === 'true';
+
+  if (!producto) throw new ErrorDeNegocio('Indique el producto.');
+  if (Number.isNaN(kilos) || kilos <= 0) throw new ErrorDeNegocio('Los kilos deben ser mayores a 0.');
+
+  const sucursal = await Sucursal.findByPk(sucursalId);
+  if (!sucursal) throw new ErrorDeNegocio('La sucursal no existe.');
+
+  return sequelize.transaction(async (transaction) => {
+    if (!suma) {
+      const disponible = await existenciaDeProducto(sucursalId, producto, transaction);
+      if (kilos > disponible + 0.0005) {
+        throw new ErrorDeNegocio(`No se puede quitar ${kilos} kg: de ${producto} solo hay ${disponible}.`);
+      }
+    }
+
+    return MovimientoSucursal.create(
+      {
+        sucursal_id: sucursalId,
+        fecha: datos.fecha || undefined,
+        producto,
+        // Quitar producto casi siempre es una pérdida; agregarlo es un
+        // ajuste de conteo. Se pueden distinguir después en el historial.
+        tipo: suma ? 'ajuste' : datos.tipo === 'merma' ? 'merma' : 'ajuste',
+        signo: suma ? 1 : -1,
+        kilos: redondearKg(kilos),
+        piezas: aEntero(datos.piezas),
+        descripcion: datos.motivo ? String(datos.motivo).trim() : 'Ajuste de inventario',
+      },
+      { transaction }
+    );
+  });
+};
+
+/** Inventario de TODAS las sucursales, para que el administrador lo vea. */
+const inventarioDeTodas = async () => {
+  const sucursales = await Sucursal.findAll({ where: { activo: true }, order: [['nombre', 'ASC']] });
+
+  return Promise.all(
+    sucursales.map(async (s) => {
+      const productos = await existenciaSucursal(s.id);
+      return {
+        sucursal: { id: s.id, nombre: s.nombre, moneda: s.moneda },
+        productos,
+        totales: {
+          productos: productos.length,
+          kilos: redondearKg(productos.reduce((acc, p) => acc + p.kilos, 0)),
+        },
+      };
+    })
+  );
+};
+
 /** Anula una venta y deshace lo que movió. */
 const anularVenta = async (ventaId, motivo) => {
   return sequelize.transaction(async (transaction) => {
@@ -574,5 +638,7 @@ module.exports = {
   confirmarRecepcion,
   resolverDiferencia,
   anularVenta,
+  ajustarInventarioSucursal,
+  inventarioDeTodas,
   TOLERANCIA_KG,
 };

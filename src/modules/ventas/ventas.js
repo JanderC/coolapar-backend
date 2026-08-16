@@ -207,6 +207,34 @@ const inventarioSucursal = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * La sucursal carga o corrige su inventario a mano.
+ * El administrador también puede, indicando la sucursal.
+ * @route POST /api/ventas/sucursal/ajuste
+ */
+const ajustarInventario = conErroresDeNegocio(async (req, res) => {
+  const sucursalId = req.sucursalFiltro !== null ? req.sucursalFiltro : Number(req.body.sucursal_id);
+  if (!sucursalId) return res.status(400).json({ success: false, message: 'Indique la sucursal.' });
+
+  const movimiento = await ventasService.ajustarInventarioSucursal(sucursalId, req.body);
+  const suma = movimiento.signo > 0;
+
+  res.status(201).json({
+    success: true,
+    message: suma
+      ? `Se cargaron ${movimiento.kilos} kg de ${movimiento.producto}.`
+      : `Se descontaron ${movimiento.kilos} kg de ${movimiento.producto}.`,
+    data: movimiento,
+  });
+});
+
+// @desc  Inventario de todas las sucursales, para el administrador.
+// @route GET /api/ventas/sucursales/inventarios
+const inventariosDeTodas = asyncHandler(async (req, res) => {
+  const data = await ventasService.inventarioDeTodas();
+  res.json({ success: true, data });
+});
+
 // @route POST /api/ventas/sucursal
 const venderDesdeSucursal = conErroresDeNegocio(async (req, res) => {
   const venta = await ventasService.registrarVentaSucursal(req.body, req.usuario);
@@ -254,6 +282,9 @@ router.use(alcanceSucursal);
 
 // ---- Sucursal ----
 router.get('/sucursal/inventario', inventarioSucursal);
+// Solo el personal de planta ve el inventario de todas.
+router.get('/sucursales/inventarios', permitirRoles('admin', 'contabilidad', 'operador'), inventariosDeTodas);
+router.post('/sucursal/ajuste', ajustarInventario);
 router.get('/sucursal/movimientos', movimientosSucursal);
 router.post('/sucursal', soloSucursal, reglasVenta, validar, venderDesdeSucursal);
 
