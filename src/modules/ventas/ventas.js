@@ -308,6 +308,109 @@ const movimientosSucursal = asyncHandler(async (req, res) => {
 });
 
 // ============================================================
+//  DETALLE DE UNA SUCURSAL  (vista del administrador)
+//
+//  Todo lo de una sucursal en una sola llamada: su inventario, lo que
+//  vendió, lo que se le despachó y sus movimientos. Se arma aquí y no
+//  con cuatro consultas desde la pantalla para que las cifras salgan
+//  del mismo instante: pedidas por separado, el inventario puede venir
+//  de antes de una venta que sí aparece en la lista.
+//  @route GET /api/ventas/sucursales/:id/detalle?fecha_inicio=&fecha_fin=
+// ============================================================
+const detalleSucursal = asyncHandler(async (req, res) => {
+  const sucursalId = Number(req.params.id);
+  const sucursal = await Sucursal.findByPk(sucursalId);
+  if (!sucursal) return res.status(404).json({ success: false, message: 'Sucursal no encontrada.' });
+
+  const { fecha_inicio, fecha_fin } = req.query;
+  const enRango = !vacio(fecha_inicio) && !vacio(fecha_fin);
+  const filtroFecha = enRango ? { fecha: { [Op.between]: [fecha_inicio, fecha_fin] } } : {};
+
+  const [inventario, catalogo, ventas, despachos, movimientos] = await Promise.all([
+    ventasService.existenciaSucursal(sucursalId),
+    ventasService.listarCatalogo(sucursalId),
+
+    // Lo que la sucursal le vendió a sus clientes.
+    Venta.findAll({
+      where: { sucursal_id: sucursalId, origen: 'sucursal', ...filtroFecha },
+      include: [{ model: VentaItem, as: 'Items', required: false }],
+      order: [['fecha', 'DESC'], ['id', 'DESC']],
+      limit: 500,
+    }),
+
+    // Lo que la planta le despachó.
+    Venta.findAll({
+      where: { sucursal_id: sucursalId, origen: 'planta', ...filtroFecha },
+      include: [{ model: VentaItem, as: 'Items', required: false }],
+      order: [['fecha', 'DESC'], ['id', 'DESC']],
+      limit: 500,
+    }),
+
+    MovimientoSucursal.findAll({
+      where: { sucursal_id: sucursalId, ...filtroFecha },
+      order: [['fecha', 'DESC'], ['id', 'DESC']],
+      limit: 500,
+    }),
+  ]);
+
+  // ---- Totales de lo vendido, por moneda ----
+  const porMoneda = new Map();
+  ventas
+    .filter((v) => v.estado === 'registrada')
+    .forEach((v) => {
+      const acumulado = porMoneda.get(v.moneda) || { moneda: v.moneda, ventas: 0, total: 0 };
+      acumulado.ventas += 1;
+      acumulado.total = Number((acumulado.total + Number(v.total)).toFixed(2));
+      porMoneda.set(v.moneda, acumulado);
+    });
+
+  // ---- Día por día, que es como se revisa una tienda ----
+  const porDia = new Map();
+  ventas
+    .filter((v) => v.estado === 'registrada')
+    .forEach((v) => {
+      const clave = `${v.fecha}|${v.moneda}`;
+      const dia = porDia.get(clave) || { fecha: v.fecha, moneda: v.moneda, ventas: 0, total: 0 };
+      dia.ventas += 1;
+      dia.total = Number((dia.total + Number(v.total)).toFixed(2));
+      porDia.set(clave, dia);
+    });
+
+  // ---- Lo que más se vendió ----
+  const porProducto = new Map();
+  ventas
+    .filter((v) => v.estado === 'registrada')
+    .forEach((v) => {
+      (v.Items || []).forEach((i) => {
+        const fila = porProducto.get(i.producto) || { producto: i.producto, cantidad: 0, total: 0, moneda: v.moneda };
+        fila.cantidad = Number((fila.cantidad + Number(i.kilos)).toFixed(3));
+        fila.total = Number((fila.total + Number(i.subtotal)).toFixed(2));
+        porProducto.set(i.producto, fila);
+      });
+    });
+
+  res.json({
+    success: true,
+    data: {
+      sucursal,
+      rango: enRango ? { fecha_inicio, fecha_fin } : null,
+      inventario,
+      catalogo,
+      ventas,
+      despachos,
+      movimientos,
+      totales: {
+        por_moneda: [...porMoneda.values()].sort((a, b) => a.moneda.localeCompare(b.moneda)),
+        por_dia: [...porDia.values()].sort((a, b) => String(b.fecha).localeCompare(String(a.fecha))),
+        por_producto: [...porProducto.values()].sort((a, b) => b.total - a.total),
+        despachos_pendientes: despachos.filter((d) => d.estado_despacho === 'pendiente').length,
+        despachos_con_diferencia: despachos.filter((d) => d.estado_despacho === 'diferencia').length,
+      },
+    },
+  });
+});
+
+// ============================================================
 //  Reglas
 // ============================================================
 const reglasVenta = [
@@ -331,6 +434,13 @@ router.post('/sucursal/productos', crearProductoSucursal);
 router.put('/sucursal/productos/:id', [param('id').isInt()], validar, actualizarProductoSucursal);
 // Solo el personal de planta ve el inventario de todas.
 router.get('/sucursales/inventarios', permitirRoles('admin', 'contabilidad', 'operador'), inventariosDeTodas);
+router.get(
+  '/sucursales/:id/detalle',
+  permitirRoles('admin', 'contabilidad', 'operador'),
+  [param('id').isInt()],
+  validar,
+  detalleSucursal
+);
 router.post('/sucursal/ajuste', ajustarInventario);
 router.get('/sucursal/movimientos', movimientosSucursal);
 router.post('/sucursal', soloSucursal, reglasVenta, validar, venderDesdeSucursal);
