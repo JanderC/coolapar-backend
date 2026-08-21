@@ -27,7 +27,8 @@ module.exports = (sequelize, DataTypes) => {
       // diario de RegistroLecheProductor.
       precio_litro: {
         type: DataTypes.DECIMAL(10, 2),
-        allowNull: true,
+        allowNull: false,
+        defaultValue: 0,
         validate: { min: { args: [0], msg: 'El precio no puede ser negativo.' } },
       },
 
@@ -39,7 +40,7 @@ module.exports = (sequelize, DataTypes) => {
       },
 
       estado_pago: {
-        type: DataTypes.STRING(10),
+        type: DataTypes.STRING(20),
         allowNull: false,
         defaultValue: 'pendiente',
         validate: { isIn: { args: [ESTADOS_PAGO], msg: `Estado inválido. Use: ${ESTADOS_PAGO.join(', ')}` } },
@@ -48,12 +49,15 @@ module.exports = (sequelize, DataTypes) => {
       fecha_pago: { type: DataTypes.DATEONLY, allowNull: true },
     },
     {
-      tableName: 'pagos_productor',
+      // OJO: el nombre real en Postgres es plural, "pagos_productores".
+      tableName: 'pagos_productores',
+      // La tabla solo tiene created_at (sin updated_at), igual que
+      // RegistroLecheProductor.
       timestamps: true,
       createdAt: 'created_at',
-      updatedAt: 'updated_at',
-      // Un único pago por productor+semana: el controller hace
-      // findOne + update/create sobre este mismo par.
+      updatedAt: false,
+      // Ya existe como índice único en la BD:
+      // pagos_productores_productor_id_semana_id_key.
       indexes: [{ unique: true, fields: ['productor_id', 'semana_id'] }],
     }
   );
