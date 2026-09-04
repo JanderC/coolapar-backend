@@ -346,6 +346,177 @@ const armarHojaRango = async (rutero, desde, hasta) => {
  * @route GET /api/ruteros/hoja-consulta?rutero_id=&semana_id=
  *        o bien ?rutero_id=&fecha_inicio=&fecha_fin=
  */
+// ------------------------------------------------------------
+//  ELIMINAR SEMANAS
+//
+//  semanas_pago NO es exclusiva de los ruteros: el módulo de productores
+//  (y cualquier otro que se agregue) cuelga sus registros de la misma
+//  fila. Antes de borrar hay que preguntarle a la base quién más la está
+//  usando, igual que hace el módulo de registro de leche de productores.
+// ------------------------------------------------------------
+
+const NOMBRE_TABLA_SEMANAS = String(SemanaPago.getTableName());
+const NOMBRE_TABLA_REGISTROS_RUTERO = String(RegistroLecheRutero.getTableName());
+const NOMBRE_TABLA_PAGOS_RUTERO = PagoRutero ? String(PagoRutero.getTableName()) : null;
+
+const MODULOS = {
+  registro_leche_productor: 'registro de leche de productores',
+  registro_leche_productores: 'registro de leche de productores',
+  pagos_productor: 'pagos a productores',
+  pagos_productores: 'pagos a productores',
+  inventario_insumos: 'inventario de insumos',
+};
+
+const nombreModulo = (tabla) => MODULOS[tabla] || tabla;
+
+let cacheReferenciasRutero = null;
+
+/** Tablas y columnas que apuntan a semanas_pago, leídas del catálogo de
+ * Postgres. Se consulta una sola vez por proceso. */
+const tablasQueReferencianSemanas = async () => {
+  if (cacheReferenciasRutero) return cacheReferenciasRutero;
+
+  const filas = await db.sequelize.query(
+    `SELECT origen.relname AS tabla, atributo.attname AS columna
+       FROM pg_constraint restriccion
+       JOIN pg_class origen  ON origen.oid  = restriccion.conrelid
+       JOIN pg_class destino ON destino.oid = restriccion.confrelid
+       JOIN unnest(restriccion.conkey) AS clave(attnum) ON TRUE
+       JOIN pg_attribute atributo
+         ON atributo.attrelid = origen.oid AND atributo.attnum = clave.attnum
+      WHERE restriccion.contype = 'f'
+        AND destino.relname = :tabla`,
+    { replacements: { tabla: NOMBRE_TABLA_SEMANAS }, type: db.Sequelize.QueryTypes.SELECT }
+  );
+
+  // Las del propio módulo de ruteros sí se borran en cascada manual, más
+  // abajo. El resto son "de otro dueño": si tienen filas, no se toca nada.
+  cacheReferenciasRutero = filas.filter(
+    (f) => f.tabla !== NOMBRE_TABLA_REGISTROS_RUTERO && f.tabla !== NOMBRE_TABLA_PAGOS_RUTERO
+  );
+  return cacheReferenciasRutero;
+};
+
+/** Módulos ajenos que todavía tienen datos colgando de esta semana. */
+const usosAjenos = async (semanaId) => {
+  let referencias;
+  try {
+    referencias = await tablasQueReferencianSemanas();
+  } catch {
+    // Si el catálogo no se puede leer (otro motor, permisos), se prefiere
+    // no borrar nada a borrar de más.
+    return [{ tabla: 'desconocido', filas: 0, incierto: true }];
+  }
+
+  const usos = [];
+  for (const referencia of referencias) {
+    const filas = await db.sequelize.query(
+      `SELECT COUNT(*)::int AS total FROM "${referencia.tabla}" WHERE "${referencia.columna}" = :id`,
+      { replacements: { id: semanaId }, type: db.Sequelize.QueryTypes.SELECT }
+    );
+    const total = Number(filas[0]?.total || 0);
+    if (total > 0) usos.push({ tabla: referencia.tabla, filas: total });
+  }
+  return usos;
+};
+
+const textoUsos = (usos) =>
+  usos.map((u) => (u.incierto ? 'otro módulo' : `${nombreModulo(u.tabla)} (${u.filas} registro(s))`)).join(', ');
+
+/**
+ * @route DELETE /api/ruteros/semanas/vacias?rutero_id=
+ * Borra en bloque las semanas de ruteros que quedaron sin un solo día
+ * cargado. Es la limpieza pensada específicamente para las semanas que
+ * el bug de auto-creación dejó regadas antes de corregirlo: nunca tocan
+ * una semana que tenga litros, pago, o que otro módulo esté usando.
+ */
+const limpiarSemanasVacias = asyncHandler(async (req, res) => {
+  const where = { rutero_id: { [Op.ne]: null } };
+  if (!vacio(req.query.rutero_id)) where.rutero_id = Number(req.query.rutero_id);
+
+  const semanas = await SemanaPago.findAll({ where });
+  if (semanas.length === 0) {
+    return res.json({ success: true, message: 'No hay semanas para revisar.', data: { eliminadas: 0 } });
+  }
+
+  const ids = semanas.map((s) => s.id);
+  const registros = await RegistroLecheRutero.findAll({
+    where: { semana_id: ids },
+    attributes: ['semana_id'],
+  });
+  const idsConDatos = new Set(registros.map((r) => Number(r.semana_id)));
+
+  let eliminadas = 0;
+  for (const semana of semanas) {
+    if (idsConDatos.has(semana.id)) continue; // tiene al menos un día cargado
+    if (semana.estado === 'cerrada') continue; // no se toca sola, aunque esté vacía
+
+    const pago = await PagoRutero.findOne({ where: { semana_id: semana.id } });
+    if (pago) continue; // ya tiene algo de pago asociado, mejor no tocarla en bloque
+
+    const usos = await usosAjenos(semana.id);
+    if (usos.length > 0) continue; // otro módulo la está usando
+
+    await semana.destroy();
+    eliminadas += 1;
+  }
+
+  res.json({
+    success: true,
+    message: `${eliminadas} semana(s) vacía(s) eliminada(s).`,
+    data: { eliminadas },
+  });
+});
+
+/**
+ * @route DELETE /api/ruteros/semanas/:id?forzar=true
+ * Elimina una semana puntual. Si tiene pago registrado, está cerrada, o
+ * algún otro módulo tiene datos colgando de ella, exige `forzar=true`
+ * para no borrar algo importante por accidente.
+ */
+const eliminarSemana = asyncHandler(async (req, res) => {
+  const semana = await SemanaPago.findByPk(req.params.id);
+  if (!semana) return res.status(404).json({ success: false, message: 'Semana no encontrada.' });
+
+  const forzar = req.query.forzar === 'true';
+  const razones = [];
+
+  const usos = await usosAjenos(semana.id);
+  if (usos.length > 0) razones.push(`otro módulo tiene datos asociados: ${textoUsos(usos)}`);
+
+  const pago = await PagoRutero.findOne({ where: { semana_id: semana.id } });
+  if (pago?.estado_pago === 'pagado') razones.push('ya tiene un pago registrado');
+  if (semana.estado === 'cerrada') razones.push('está cerrada');
+
+  if (razones.length > 0 && !forzar) {
+    return res.status(409).json({
+      success: false,
+      message: `No se puede eliminar: ${razones.join('; ')}. Use "forzar" si quiere borrarla de todas formas.`,
+    });
+  }
+
+  const transaccion = await db.sequelize.transaction();
+  try {
+    await RegistroLecheRutero.destroy({ where: { semana_id: semana.id }, transaction: transaccion });
+    await PagoRutero.destroy({ where: { semana_id: semana.id }, transaction: transaccion });
+    await semana.destroy({ transaction: transaccion });
+    await transaccion.commit();
+  } catch (err) {
+    await transaccion.rollback();
+    throw err;
+  }
+
+  res.json({ success: true, message: 'Semana eliminada.' });
+});
+
+/**
+ * Hoja de SOLO LECTURA. Existe aparte de /hoja porque aquella pasa por
+ * resolverSemana, que CREA o AJUSTA la semana si no existe: imprimir o
+ * consultar no puede tener ese efecto.
+ *
+ * @route GET /api/ruteros/hoja-consulta?rutero_id=&semana_id=
+ *        o bien ?rutero_id=&fecha_inicio=&fecha_fin=
+ */
 const hojaConsulta = asyncHandler(async (req, res) => {
   const rutero = await Rutero.findByPk(req.query.rutero_id);
   if (!rutero) return res.status(404).json({ success: false, message: 'Rutero no encontrado.' });
@@ -798,6 +969,9 @@ router.post(
   '/hoja',
   [
     body('rutero_id').isInt().withMessage('Seleccione un rutero'),
+    // O bien semana_id (reabrir una guardada), o bien fecha_inicio/dia_inicio
+    // + dia_fin (se está guardando esa semana por primera vez). El
+    // controlador valida la combinación exacta.
     body('semana_id').optional({ nullable: true }).isInt().withMessage('Semana inválida'),
     body('fecha_inicio').optional({ nullable: true }).isISO8601().withMessage('Fecha de inicio inválida'),
     body('dia_inicio').optional({ nullable: true }).isInt({ min: 0, max: 6 }).withMessage('Día de inicio inválido'),
@@ -821,6 +995,25 @@ router.post(
 router.get('/historial', [query('rutero_id').isInt()], validar, historial);
 // Solo lectura: no crea ni modifica semanas. Es la que usa la impresión.
 router.get('/hoja-consulta', [query('rutero_id').isInt()], validar, hojaConsulta);
+
+// '/semanas/vacias' va ANTES de '/semanas/:id': si no, Express intenta
+// leer "vacias" como un id.
+router.delete(
+  '/semanas/vacias',
+  permitirRoles('admin', 'contabilidad'),
+  [query('rutero_id').optional().isInt()],
+  validar,
+  limpiarSemanasVacias
+);
+
+router.delete(
+  '/semanas/:id',
+  permitirRoles('admin', 'contabilidad'),
+  [param('id').isInt(), query('forzar').optional().isIn(['true', 'false'])],
+  validar,
+  eliminarSemana
+);
+
 // Todos los ruteros de un rango de fechas, día por día.
 router.get(
   '/resumen-semana',
