@@ -31,6 +31,21 @@ module.exports = (sequelize, DataTypes) => {
         },
       },
 
+      // Si esta compra se anotó en la unidad de compra del insumo (ej.
+      // "1 pote") en vez de la unidad base, acá queda ese número y esa
+      // etiqueta tal como estaban en ese momento. "cantidad" (arriba)
+      // SIEMPRE queda en la unidad base — es lo que de verdad mueve el
+      // stock. Estos dos campos son solo para que el historial diga
+      // "1 pote (=1000 ml)" en vez de solo "1000 ml".
+      cantidad_original: {
+        type: DataTypes.DECIMAL(12, 2),
+        allowNull: true,
+      },
+      unidad_original: {
+        type: DataTypes.STRING(30),
+        allowNull: true,
+      },
+
       // Precio y moneda de ESTE movimiento en particular (la moneda puede
       // variar de una compra a otra). Obligatorios cuando tipo='entrada';
       // en una salida normalmente quedan vacíos.

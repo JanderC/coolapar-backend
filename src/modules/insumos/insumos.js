@@ -81,6 +81,18 @@ const normalizarCampos = (body = {}) => {
     datos.stock_minimo = vacio(body.stock_minimo) ? null : Number(body.stock_minimo);
   }
   if (body.proveedor !== undefined) datos.proveedor = vacio(body.proveedor) ? null : String(body.proveedor).trim();
+  if (body.unidad_compra !== undefined) {
+    datos.unidad_compra = vacio(body.unidad_compra) ? null : String(body.unidad_compra).trim();
+  }
+  if (body.factor_conversion !== undefined) {
+    datos.factor_conversion = vacio(body.factor_conversion) ? null : Number(body.factor_conversion);
+  }
+  if (body.dosis_cantidad !== undefined) {
+    datos.dosis_cantidad = vacio(body.dosis_cantidad) ? null : Number(body.dosis_cantidad);
+  }
+  if (body.dosis_referencia_litros !== undefined) {
+    datos.dosis_referencia_litros = vacio(body.dosis_referencia_litros) ? null : Number(body.dosis_referencia_litros);
+  }
   if (body.activo !== undefined) datos.activo = body.activo === true || body.activo === 'true';
   // stock_actual NUNCA se acepta aquí: solo lo mueve insumos.service.js a través de movimientos.
   return datos;
@@ -109,6 +121,28 @@ const validarDatos = (datos, { esCreacion }) => {
       return 'El stock mínimo debe ser un número mayor o igual a 0.';
     }
   }
+  if (datos.unidad_compra !== undefined && datos.unidad_compra && datos.unidad_compra.length > 30) {
+    return 'La unidad de compra es demasiado larga (máximo 30 caracteres).';
+  }
+  if (datos.factor_conversion !== undefined && datos.factor_conversion !== null) {
+    if (Number.isNaN(datos.factor_conversion) || datos.factor_conversion <= 0) {
+      return 'El factor de conversión debe ser un número mayor a 0.';
+    }
+  }
+  if (datos.dosis_cantidad !== undefined && datos.dosis_cantidad !== null) {
+    if (Number.isNaN(datos.dosis_cantidad) || datos.dosis_cantidad <= 0) {
+      return 'La dosis debe ser un número mayor a 0.';
+    }
+  }
+  if (datos.dosis_referencia_litros !== undefined && datos.dosis_referencia_litros !== null) {
+    if (Number.isNaN(datos.dosis_referencia_litros) || datos.dosis_referencia_litros <= 0) {
+      return 'Los litros de referencia de la dosis deben ser un número mayor a 0.';
+    }
+  }
+  // El "ambos o ninguno" de unidad_compra/factor_conversion y de
+  // dosis_cantidad/dosis_referencia_litros lo revisa el modelo (Insumo.validate):
+  // ese sí ve el estado FINAL de la fila, y acá en un PUT parcial no siempre
+  // se sabe con qué se va a quedar mezclado el campo que no vino en el body.
   return null;
 };
 
@@ -418,6 +452,47 @@ const reglasInsumo = (esCreacion) => [
     .custom((v) => v === null || (!Number.isNaN(Number(v)) && Number(v) >= 0))
     .withMessage('El stock mínimo debe ser un número mayor o igual a 0'),
   body('proveedor').optional({ nullable: true }).isLength({ max: 150 }).withMessage('Nombre de proveedor demasiado largo'),
+  body('unidad_compra').optional({ nullable: true }).isLength({ max: 30 }).withMessage('Unidad de compra demasiado larga'),
+  body('factor_conversion')
+    .optional({ nullable: true })
+    .customSanitizer((v) => (v === '' ? null : v))
+    .custom((v) => v === null || (!Number.isNaN(Number(v)) && Number(v) > 0))
+    .withMessage('El factor de conversión debe ser un número mayor a 0'),
+  body('dosis_cantidad')
+    .optional({ nullable: true })
+    .customSanitizer((v) => (v === '' ? null : v))
+    .custom((v) => v === null || (!Number.isNaN(Number(v)) && Number(v) > 0))
+    .withMessage('La dosis debe ser un número mayor a 0'),
+  body('dosis_referencia_litros')
+    .optional({ nullable: true })
+    .customSanitizer((v) => (v === '' ? null : v))
+    .custom((v) => v === null || (!Number.isNaN(Number(v)) && Number(v) > 0))
+    .withMessage('Los litros de referencia de la dosis deben ser un número mayor a 0'),
+  // El par "ambos o ninguno" solo se puede exigir de forma confiable al
+  // CREAR: ahí el body trae la foto completa. En un PUT parcial, si solo
+  // viene uno de los dos, puede ser perfectamente válido (el otro ya
+  // estaba guardado) — eso lo termina de revisar el modelo, que sí ve la
+  // fila completa después de mezclar los cambios.
+  ...(esCreacion
+    ? [
+        body('factor_conversion').custom((v, { req }) => {
+          const tieneUnidad = !vacio(req.body.unidad_compra);
+          const tieneFactor = !vacio(v);
+          if (tieneUnidad !== tieneFactor) {
+            throw new Error('Indique la unidad de compra y su factor de conversión juntos, o ninguno de los dos.');
+          }
+          return true;
+        }),
+        body('dosis_referencia_litros').custom((v, { req }) => {
+          const tieneCantidad = !vacio(req.body.dosis_cantidad);
+          const tieneReferencia = !vacio(v);
+          if (tieneCantidad !== tieneReferencia) {
+            throw new Error('Indique la dosis y los litros de referencia juntos, o ninguno de los dos.');
+          }
+          return true;
+        }),
+      ]
+    : []),
 ];
 
 const reglasMovimiento = [
@@ -432,6 +507,11 @@ const reglasMovimiento = [
     .withMessage('El precio unitario debe ser un número mayor o igual a 0'),
   // Una carga inicial o un ajuste entran sin precio: no hay factura.
   body('es_ajuste').optional({ nullable: true }).isBoolean().withMessage('es_ajuste debe ser verdadero o falso'),
+  // Marca que "cantidad" (y "precio_unitario", si viene) están escritos
+  // en la unidad de compra del insumo (ej. "1 pote"), no en la unidad
+  // base. Solo aplica a entradas; insumos.service.js hace la conversión
+  // y valida que el insumo de verdad tenga unidad de compra configurada.
+  body('en_unidad_compra').optional({ nullable: true }).isBoolean().withMessage('en_unidad_compra debe ser verdadero o falso'),
   body('precio_unitario').custom((v, { req }) => {
     const esAjuste = req.body.es_ajuste === true || req.body.es_ajuste === 'true';
     if (req.body.tipo === 'entrada' && !esAjuste && vacio(v)) {

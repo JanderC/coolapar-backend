@@ -32,9 +32,41 @@ const registrarMovimiento = async (insumoId, datos) => {
       throw new ErrorDeNegocio("El tipo de movimiento debe ser 'entrada' o 'salida'.");
     }
 
-    const cantidad = Number(datos.cantidad);
-    if (Number.isNaN(cantidad) || cantidad <= 0) {
+    const cantidadIngresada = Number(datos.cantidad);
+    if (Number.isNaN(cantidadIngresada) || cantidadIngresada <= 0) {
       throw new ErrorDeNegocio('La cantidad debe ser un número mayor a 0.');
+    }
+
+    // Si la compra se anotó en la unidad de compra del insumo (ej. "1
+    // pote") en vez de la unidad base del inventario, se convierte acá
+    // ANTES de tocar el stock. De ahí para abajo todo sigue trabajando
+    // en la unidad base, exactamente igual que siempre: la conversión es
+    // invisible para el resto del sistema.
+    const enUnidadCompra =
+      tipo === 'entrada' && (datos.en_unidad_compra === true || datos.en_unidad_compra === 'true');
+
+    let cantidad = cantidadIngresada;
+    let cantidadOriginal = null;
+    let unidadOriginal = null;
+    let precioUnitarioIngresado = datos.precio_unitario;
+
+    if (enUnidadCompra) {
+      if (!insumo.unidad_compra || vacio(insumo.factor_conversion)) {
+        throw new ErrorDeNegocio('Este insumo no tiene configurada una unidad de compra con su factor de conversión.');
+      }
+      const factor = Number(insumo.factor_conversion);
+      cantidad = Number((cantidadIngresada * factor).toFixed(2));
+      cantidadOriginal = cantidadIngresada;
+      unidadOriginal = insumo.unidad_compra;
+
+      // El precio también se anota "por unidad de compra" (ej. "pagué
+      // $50 por el pote"), que es como lo piensa quien compra. Se
+      // convierte a precio por unidad base para que el resto de los
+      // cálculos de costo (que siempre trabajan en la unidad base) no
+      // se enteren de la diferencia.
+      if (!vacio(precioUnitarioIngresado)) {
+        precioUnitarioIngresado = Number((Number(precioUnitarioIngresado) / factor).toFixed(4));
+      }
     }
 
     // Una COMPRA necesita precio y moneda: sin eso no se puede saber
@@ -68,9 +100,11 @@ const registrarMovimiento = async (insumoId, datos) => {
         insumo_id: insumo.id,
         tipo,
         cantidad,
+        cantidad_original: cantidadOriginal,
+        unidad_original: unidadOriginal,
         // En un ajuste el precio se descarta aunque venga: lo que define
         // a una compra es tener precio, y un ajuste no lo es.
-        precio_unitario: esAjuste || vacio(datos.precio_unitario) ? null : Number(datos.precio_unitario),
+        precio_unitario: esAjuste || vacio(precioUnitarioIngresado) ? null : Number(precioUnitarioIngresado),
         moneda: esAjuste || vacio(datos.moneda) ? null : String(datos.moneda).toUpperCase(),
         fecha: datos.fecha || undefined,
         descripcion: vacio(datos.descripcion) ? null : String(datos.descripcion).trim(),
