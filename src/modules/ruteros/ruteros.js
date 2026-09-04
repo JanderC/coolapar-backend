@@ -107,7 +107,40 @@ const eliminar = asyncHandler(async (req, res) => {
 //  Mismos días de la semana que el productor: se eligen por nombre.
 // ============================================================
 
-const resolverSemana = async (rutero, { semana_id, dia_inicio, dia_fin, fecha_inicio }) => {
+/** Calcula fecha de inicio/fin y día de inicio/fin a partir de los
+ * parámetros que manda el frontend, sin tocar la base de datos. */
+const calcularCicloRutero = ({ dia_inicio, dia_fin, fecha_inicio }) => {
+  if (!esDiaValido(dia_fin)) {
+    throw Object.assign(new Error('Indique el día en que termina la semana.'), { status: 400 });
+  }
+  const fin = Number(dia_fin);
+
+  if (!vacio(fecha_inicio)) {
+    if (!esFechaValida(fecha_inicio)) {
+      throw Object.assign(new Error('La fecha de inicio no es válida.'), { status: 400 });
+    }
+    const fechaInicioTexto = fecha_inicio;
+    const inicio = diaSemana(fechaInicioTexto);
+    const fechaFinTexto = sumarDias(fechaInicioTexto, largoCiclo(inicio, fin) - 1);
+    return { inicio, fin, fechaInicioTexto, fechaFinTexto };
+  }
+
+  if (!esDiaValido(dia_inicio)) {
+    throw Object.assign(new Error('Indique el día en que inicia y el día en que termina.'), { status: 400 });
+  }
+  const inicio = Number(dia_inicio);
+  const { fecha_inicio: fechaInicioTexto, fecha_fin: fechaFinTexto } = cicloVigente(inicio, fin);
+  return { inicio, fin, fechaInicioTexto: aTexto(fechaInicioTexto), fechaFinTexto: aTexto(fechaFinTexto) };
+};
+
+/**
+ * SOLO LECTURA. Devuelve la semana pedida (o la busca por fechas), pero
+ * NUNCA crea ni modifica una fila. Si todavía no existe ninguna semana
+ * guardada para ese rango, se arma un objeto en memoria (id: null) para
+ * que la pantalla pueda mostrar la hoja vacía. Es el bug que se corrige
+ * aquí: antes esta misma función creaba la semana con solo consultarla.
+ */
+const resolverSemanaLectura = async (rutero, { semana_id, dia_inicio, dia_fin, fecha_inicio }) => {
   if (!vacio(semana_id)) {
     const semana = await SemanaPago.findByPk(semana_id);
     if (!semana) throw Object.assign(new Error('Semana no encontrada.'), { status: 404 });
@@ -117,29 +150,38 @@ const resolverSemana = async (rutero, { semana_id, dia_inicio, dia_fin, fecha_in
     return semana;
   }
 
-  if (!esDiaValido(dia_fin)) {
-    throw Object.assign(new Error('Indique el día en que termina la semana.'), { status: 400 });
-  }
-  const fin = Number(dia_fin);
+  const { inicio, fin, fechaInicioTexto, fechaFinTexto } = calcularCicloRutero({ dia_inicio, dia_fin, fecha_inicio });
 
-  let inicio;
-  let fechaInicioTexto;
-  let fechaFinTexto;
+  const existente = await SemanaPago.findOne({ where: { rutero_id: rutero.id, fecha_inicio: fechaInicioTexto } });
+  if (existente) return existente;
 
-  if (!vacio(fecha_inicio)) {
-    if (!esFechaValida(fecha_inicio)) {
-      throw Object.assign(new Error('La fecha de inicio no es válida.'), { status: 400 });
+  return {
+    id: null,
+    rutero_id: rutero.id,
+    fecha_inicio: fechaInicioTexto,
+    fecha_fin: fechaFinTexto,
+    dia_inicio: inicio,
+    dia_fin: fin,
+    estado: 'abierta',
+  };
+};
+
+/**
+ * Igual que resolverSemanaLectura, pero esta SÍ puede crear la fila o
+ * ajustar su rango de fechas. Se usa únicamente al guardar (POST /hoja):
+ * es el único momento en que "consultar" debe convertirse en "persistir".
+ */
+const resolverSemanaEscritura = async (rutero, { semana_id, dia_inicio, dia_fin, fecha_inicio }) => {
+  if (!vacio(semana_id)) {
+    const semana = await SemanaPago.findByPk(semana_id);
+    if (!semana) throw Object.assign(new Error('Semana no encontrada.'), { status: 404 });
+    if (semana.rutero_id && Number(semana.rutero_id) !== Number(rutero.id)) {
+      throw Object.assign(new Error('Esa semana pertenece a otro rutero.'), { status: 400 });
     }
-    fechaInicioTexto = fecha_inicio;
-    inicio = diaSemana(fechaInicioTexto);
-    fechaFinTexto = sumarDias(fechaInicioTexto, largoCiclo(inicio, fin) - 1);
-  } else {
-    if (!esDiaValido(dia_inicio)) {
-      throw Object.assign(new Error('Indique el día en que inicia y el día en que termina.'), { status: 400 });
-    }
-    inicio = Number(dia_inicio);
-    ({ fecha_inicio: fechaInicioTexto, fecha_fin: fechaFinTexto } = cicloVigente(inicio, fin));
+    return semana;
   }
+
+  const { inicio, fin, fechaInicioTexto, fechaFinTexto } = calcularCicloRutero({ dia_inicio, dia_fin, fecha_inicio });
 
   const existente = await SemanaPago.findOne({ where: { rutero_id: rutero.id, fecha_inicio: fechaInicioTexto } });
 
@@ -199,7 +241,11 @@ const armarHoja = async (rutero, semana) => {
   const total_sobrante = redondear(dias.reduce((s, d) => s + (d.sobrante || 0), 0));
   const total_faltante = redondear(dias.reduce((s, d) => s + (d.faltante || 0), 0));
 
-  const pago = await PagoRutero.findOne({ where: { rutero_id: rutero.id, semana_id: semana.id } });
+  // Si la semana todavía no existe (id: null, viene de resolverSemanaLectura)
+  // no tiene sentido buscarle pago: no hay fila a la que colgarlo.
+  const pago = semana.id
+    ? await PagoRutero.findOne({ where: { rutero_id: rutero.id, semana_id: semana.id } })
+    : null;
 
   const precio_litro = pago ? Number(pago.precio_litro) : Number(rutero.precio_litro || 0);
   const moneda = pago ? pago.moneda : normalizarMoneda(rutero.moneda, 'COP');
@@ -215,6 +261,11 @@ const armarHoja = async (rutero, semana) => {
     semana: {
       id: semana.id,
       estado: semana.estado,
+      // El front las necesita para poder guardar una semana que todavía
+      // no existe (semana.id === null): sin esto no tendría con qué
+      // armar el POST /hoja la primera vez.
+      fecha_inicio: aTexto(semana.fecha_inicio),
+      fecha_fin: aTexto(semana.fecha_fin),
       dia_inicio: semana.dia_inicio,
       dia_fin: semana.dia_fin,
       etiqueta: etiquetaDias(semana.dia_inicio, semana.dia_fin),
@@ -320,12 +371,14 @@ const hojaConsulta = asyncHandler(async (req, res) => {
 });
 
 // @route GET /api/ruteros/hoja?rutero_id=&dia_inicio=&dia_fin=  (o &semana_id=)
+// SOLO LECTURA: abrir esta pantalla (elegir rutero, cambiar de fecha) no
+// debe crear nada en semanas_pago. Eso solo pasa al guardar.
 const obtenerHoja = asyncHandler(async (req, res) => {
   const rutero = await Rutero.findByPk(req.query.rutero_id);
   if (!rutero) return res.status(404).json({ success: false, message: 'Rutero no encontrado.' });
 
   try {
-    const semana = await resolverSemana(rutero, req.query);
+    const semana = await resolverSemanaLectura(rutero, req.query);
     res.json({ success: true, data: await armarHoja(rutero, semana) });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ success: false, message: err.message });
@@ -334,19 +387,26 @@ const obtenerHoja = asyncHandler(async (req, res) => {
 });
 
 // @route POST /api/ruteros/hoja
+// Acá SÍ se puede crear o ajustar la semana: es el único lugar donde
+// "guardar" debe tener ese efecto. Acepta semana_id (reabrir una del
+// historial) o fecha_inicio/dia_inicio + dia_fin (primera vez que se
+// guarda esa semana, todavía sin id).
 const guardarHoja = asyncHandler(async (req, res) => {
-  const { rutero_id, semana_id, dias } = req.body;
+  const { rutero_id, dias } = req.body;
   const precio_litro = aNumero(req.body.precio_litro, NaN);
   const moneda = normalizarMoneda(req.body.moneda, 'COP');
 
   const rutero = await Rutero.findByPk(rutero_id);
   if (!rutero) return res.status(404).json({ success: false, message: 'Rutero no encontrado.' });
 
-  const semana = await SemanaPago.findByPk(semana_id);
-  if (!semana) return res.status(404).json({ success: false, message: 'Semana no encontrada.' });
-  if (semana.rutero_id && Number(semana.rutero_id) !== Number(rutero.id)) {
-    return res.status(400).json({ success: false, message: 'Esa semana pertenece a otro rutero.' });
+  let semana;
+  try {
+    semana = await resolverSemanaEscritura(rutero, req.body);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ success: false, message: err.message });
+    throw err;
   }
+
   if (semana.estado === 'cerrada') {
     return res.status(400).json({ success: false, message: 'La semana está cerrada. Reábrala para editarla.' });
   }
@@ -738,7 +798,10 @@ router.post(
   '/hoja',
   [
     body('rutero_id').isInt().withMessage('Seleccione un rutero'),
-    body('semana_id').isInt().withMessage('Falta la semana'),
+    body('semana_id').optional({ nullable: true }).isInt().withMessage('Semana inválida'),
+    body('fecha_inicio').optional({ nullable: true }).isISO8601().withMessage('Fecha de inicio inválida'),
+    body('dia_inicio').optional({ nullable: true }).isInt({ min: 0, max: 6 }).withMessage('Día de inicio inválido'),
+    body('dia_fin').optional({ nullable: true }).isInt({ min: 0, max: 6 }).withMessage('Día de cierre inválido'),
     body('precio_litro').isFloat({ gt: 0 }).withMessage('El precio por litro debe ser mayor a 0'),
     body('moneda').optional().customSanitizer((v) => String(v || '').toUpperCase()).isIn(MONEDAS),
     body('dias').isArray({ min: 1 }).withMessage('Faltan los días de la semana'),
